@@ -2,10 +2,12 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, status, Security
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import json
 import asyncio
+import os
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -357,3 +359,30 @@ async def health(db: AsyncSession = Depends(get_session)):
     if health_status["status"] == "unhealthy":
         return JSONResponse(status_code=503, content=health_status)
     return health_status
+
+# Serve compiled frontend assets
+static_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "static_dist"))
+if os.path.exists(static_dir):
+    assets_dir = os.path.join(static_dir, "assets")
+    if os.path.exists(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+@app.get("/")
+async def serve_index():
+    index_path = os.path.join(static_dir, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    return JSONResponse(
+        content={"message": "TaskForge API is running. Build frontend to view dashboard."},
+        status_code=200
+    )
+
+@app.get("/{full_path:path}")
+async def catch_all(full_path: str):
+    # Exclude API endpoints from routing to catch-all
+    if full_path.startswith(("decompose", "projects", "health", "docs", "openapi.json")):
+        raise HTTPException(status_code=404)
+    index_path = os.path.join(static_dir, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    raise HTTPException(status_code=404, detail="Static index.html not found. Build frontend.")

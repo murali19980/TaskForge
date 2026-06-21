@@ -40,3 +40,7 @@ ENV/
 htmlcov/
 .pytest_cache/
 .cov
+
+# Frontend development and build artifacts
+frontend/node_modules/
+static_dist/
