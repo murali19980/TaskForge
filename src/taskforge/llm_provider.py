@@ -88,8 +88,13 @@ class OllamaProvider:
 class OpenRouterProvider:
     def __init__(self, api_key: str = None, model: str = None):
         self.api_key = api_key or settings.OPENROUTER_API_KEY
-        self.model = model or settings.OPENROUTER_MODEL
-        logger.info(f"OpenRouterProvider initialized with model={self.model}")
+        self.model = model
+        if model:
+            self.model_list = [model]
+        else:
+            self.model_list = settings.openrouter_model_list
+            self.model = self.model_list[0] if self.model_list else settings.OPENROUTER_MODEL
+        logger.info(f"OpenRouterProvider initialized with models={self.model_list}")
 
     async def generate_json(self, prompt: str, expected_schema: Type[BaseModel]) -> tuple[BaseModel, UsageStats]:
         if not self.api_key:
@@ -112,98 +117,106 @@ class OpenRouterProvider:
             "Output only the raw JSON object, without markdown block wrappers or extra text."
         )
 
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
-            ],
-            "response_format": {"type": "json_object"},
-            "temperature": 0.1
-        }
+        last_exception = None
+        for model in self.model_list:
+            logger.info(f"OpenRouter attempting generation using model '{model}'...")
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                "response_format": {"type": "json_object"},
+                "temperature": 0.1
+            }
 
-        logger.debug(f"Sending payload to OpenRouter: {payload}")
+            max_attempts = 3
+            try:
+                async with httpx.AsyncClient(timeout=float(settings.LLM_REQUEST_TIMEOUT)) as client:
+                    for attempt in range(1, max_attempts + 1):
+                        try:
+                            response = await client.post(url, json=payload, headers=headers)
+                            response.raise_for_status()
+                            data = response.json()
 
-        max_attempts = 3
-        async with httpx.AsyncClient(timeout=float(settings.LLM_REQUEST_TIMEOUT)) as client:
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    response = await client.post(url, json=payload, headers=headers)
-                    response.raise_for_status()
-                    data = response.json()
+                            # Catch API errors
+                            if "error" in data:
+                                err_msg = data["error"].get("message", "Unknown OpenRouter error")
+                                raise ValueError(f"OpenRouter API returned error: {err_msg}")
 
-                    # Catch API errors
-                    if "error" in data:
-                        err_msg = data["error"].get("message", "Unknown OpenRouter error")
-                        raise ValueError(f"OpenRouter API returned error: {err_msg}")
+                            response_text = data["choices"][0]["message"]["content"].strip()
+                            logger.debug(f"Raw OpenRouter response: {response_text}")
 
-                    response_text = data["choices"][0]["message"]["content"].strip()
-                    logger.debug(f"Raw OpenRouter response: {response_text}")
+                            parsed_json = json.loads(response_text)
+                            model_inst = expected_schema.model_validate(parsed_json)
 
-                    parsed_json = json.loads(response_text)
-                    model_inst = expected_schema.model_validate(parsed_json)
+                            # Extract token usage
+                            usage_data = data.get("usage", {})
+                            prompt_tokens = usage_data.get("prompt_tokens", 0)
+                            completion_tokens = usage_data.get("completion_tokens", 0)
+                            total_tokens = usage_data.get("total_tokens", 0)
 
-                    # Extract token usage
-                    usage_data = data.get("usage", {})
-                    prompt_tokens = usage_data.get("prompt_tokens", 0)
-                    completion_tokens = usage_data.get("completion_tokens", 0)
-                    total_tokens = usage_data.get("total_tokens", 0)
+                            # Price per 1M tokens mapping: (input_cost_usd, output_cost_usd)
+                            PRICING = {
+                                "google/gemini-2.5-flash:free": (0.0, 0.0),
+                                "google/gemini-2.5-flash": (0.075, 0.30),
+                                "mistralai/mistral-nemo:free": (0.0, 0.0),
+                                "mistralai/mistral-nemo": (0.17, 0.17),
+                                "openai/gpt-4o-mini": (0.150, 0.60),
+                                "openrouter/free": (0.0, 0.0),
+                            }
 
-                    # Price per 1M tokens mapping: (input_cost_usd, output_cost_usd)
-                    PRICING = {
-                        "google/gemini-2.5-flash:free": (0.0, 0.0),
-                        "google/gemini-2.5-flash": (0.075, 0.30),
-                        "mistralai/mistral-nemo:free": (0.0, 0.0),
-                        "mistralai/mistral-nemo": (0.17, 0.17),
-                        "openai/gpt-4o-mini": (0.150, 0.60),
-                        "openrouter/free": (0.0, 0.0),
-                    }
+                            rates = PRICING.get(model, (0.150, 0.60))  # Default fallback gpt-4o-mini
+                            input_cost = (prompt_tokens * rates[0]) / 1_000_000
+                            output_cost = (completion_tokens * rates[1]) / 1_000_000
+                            estimated_cost = input_cost + output_cost
 
-                    rates = PRICING.get(self.model, (0.150, 0.60))  # Default fallback gpt-4o-mini
-                    input_cost = (prompt_tokens * rates[0]) / 1_000_000
-                    output_cost = (completion_tokens * rates[1]) / 1_000_000
-                    estimated_cost = input_cost + output_cost
+                            usage = UsageStats(
+                                prompt_tokens=prompt_tokens,
+                                completion_tokens=completion_tokens,
+                                total_tokens=total_tokens,
+                                estimated_cost_usd=estimated_cost
+                            )
 
-                    usage = UsageStats(
-                        prompt_tokens=prompt_tokens,
-                        completion_tokens=completion_tokens,
-                        total_tokens=total_tokens,
-                        estimated_cost_usd=estimated_cost
-                    )
+                            return model_inst, usage
 
-                    return model_inst, usage
-
-                except httpx.HTTPStatusError as e:
-                    if e.response.status_code == 429:
-                        retry_after = 2.0  # default backoff
-                        retry_after_hdr = e.response.headers.get("Retry-After")
-                        if retry_after_hdr:
-                            try:
-                                retry_after = float(retry_after_hdr)
-                            except ValueError:
-                                pass
-                        logger.warning(
-                            f"OpenRouter rate limit (429) hit. "
-                            f"Retry-After header: {retry_after_hdr}. "
-                            f"Waiting {retry_after}s before retry attempt {attempt}/{max_attempts}..."
-                        )
-                        if attempt == max_attempts:
-                            logger.error("Max rate limit retries reached.")
+                        except httpx.HTTPStatusError as e:
+                            if e.response.status_code == 429:
+                                retry_after = 2.0  # default backoff
+                                retry_after_hdr = e.response.headers.get("Retry-After")
+                                if retry_after_hdr:
+                                    try:
+                                        retry_after = float(retry_after_hdr)
+                                    except ValueError:
+                                        pass
+                                logger.warning(
+                                    f"OpenRouter rate limit (429) hit for model '{model}'. "
+                                    f"Retry-After header: {retry_after_hdr}. "
+                                    f"Waiting {retry_after}s before retry attempt {attempt}/{max_attempts}..."
+                                )
+                                if attempt == max_attempts:
+                                    logger.error(f"Max rate limit retries reached for model '{model}'.")
+                                    raise
+                                await asyncio.sleep(retry_after)
+                                continue
+                            else:
+                                logger.error(f"OpenRouter returned HTTP error status: {e.response.status_code} - {e.response.text}")
+                                raise
+                        except httpx.HTTPError as e:
+                            logger.error(f"HTTP error contacting OpenRouter: {str(e)}")
                             raise
-                        await asyncio.sleep(retry_after)
-                        continue
-                    else:
-                        logger.error(f"OpenRouter returned HTTP error status: {e.response.status_code} - {e.response.text}")
-                        raise
-                except httpx.HTTPError as e:
-                    logger.error(f"HTTP error contacting OpenRouter: {str(e)}")
-                    raise
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to decode response as JSON: {response_text}. Error: {str(e)}")
-                    raise ValueError(f"OpenRouter returned invalid JSON: {str(e)}")
-                except Exception as e:
-                    logger.error(f"Validation or unexpected error in OpenRouter call: {str(e)}")
-                    raise
+                        except json.JSONDecodeError as e:
+                            logger.error(f"Failed to decode response as JSON: {response_text}. Error: {str(e)}")
+                            raise ValueError(f"OpenRouter returned invalid JSON: {str(e)}")
+                        except Exception as e:
+                            logger.error(f"Validation or unexpected error in OpenRouter call: {str(e)}")
+                            raise
+            except Exception as e:
+                logger.warning(f"OpenRouter model '{model}' failed with error: {e}. Trying next model in fallback list...")
+                last_exception = e
+                continue
+
+        raise last_exception or ValueError("All OpenRouter models in fallback list failed.")
 
 class MockLLMProvider:
     """
