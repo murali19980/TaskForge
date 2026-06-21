@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     MAX_INPUT_LENGTH: int = 2000
     MAX_COST_PER_REQUEST: float = 0.01
+    LLM_REQUEST_TIMEOUT: int = 120
 
     @field_validator("OPENROUTER_MODEL")
     @classmethod

@@ -28,7 +28,9 @@ ENV/
 
 # Database files
 *.db
+*.db-journal
 *.sqlite3
+*.sqlite3-journal
 
 # Environment variables
 .env

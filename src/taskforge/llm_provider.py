@@ -43,7 +43,7 @@ class OllamaProvider:
 
         logger.debug(f"Sending payload to Ollama: {payload}")
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=float(settings.LLM_REQUEST_TIMEOUT)) as client:
             try:
                 response = await client.post(url, json=payload)
                 response.raise_for_status()
@@ -125,7 +125,7 @@ class OpenRouterProvider:
         logger.debug(f"Sending payload to OpenRouter: {payload}")
 
         max_attempts = 3
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=float(settings.LLM_REQUEST_TIMEOUT)) as client:
             for attempt in range(1, max_attempts + 1):
                 try:
                     response = await client.post(url, json=payload, headers=headers)

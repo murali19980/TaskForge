@@ -60,14 +60,14 @@ class TaskForgeEngine:
             async with sem:
                 result, usage = await asyncio.wait_for(
                     provider.generate_json(prompt, schema),
-                    timeout=120.0
+                    timeout=float(self.config.LLM_REQUEST_TIMEOUT)
                 )
             duration = time.perf_counter() - start_time
             logger.info(f"LLM call to {schema.__name__} completed in {duration:.2f}s using {provider.__class__.__name__} ({getattr(provider, 'model', 'N/A')})")
             return result, usage
         except asyncio.TimeoutError:
-            logger.error("LLM call timed out after 120 seconds")
-            raise TimeoutError("LLM generation timed out after 120 seconds")
+            logger.error(f"LLM call timed out after {self.config.LLM_REQUEST_TIMEOUT} seconds")
+            raise TimeoutError(f"LLM generation timed out after {self.config.LLM_REQUEST_TIMEOUT} seconds")
 
     async def _call_llm_with_timeout(
         self,
