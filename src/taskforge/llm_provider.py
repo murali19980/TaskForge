@@ -18,20 +18,64 @@ from taskforge.config import settings
 logger = logging.getLogger("taskforge.llm_provider")
 
 def _strip_markdown_json(text: str) -> str:
-    """Removes code fences and strips anything outside the first '{' and last '}'."""
+    """Extracts the first valid JSON object from the text using stripping and fallback extraction."""
     text = text.strip()
+    
     # 1. Strip markdown code fences if present (e.g. ```json, ```js, ```)
     text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
     text = text.strip()
 
-    # 2. Extract content starting from the first '{' to the last '}'
-    first_brace = text.find("{")
-    last_brace = text.rfind("}")
-    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-        text = text[first_brace:last_brace + 1]
+    # 2. Try loading as-is
+    try:
+        json.loads(text)
+        return text
+    except json.JSONDecodeError:
+        pass
 
-    return text.strip()
+    # 3. Fallback: Extract using brace counting to handle trailing/leading text and nested structures
+    first_brace = text.find("{")
+    if first_brace == -1:
+        return text
+
+    brace_count = 0
+    in_string = False
+    escape = False
+
+    for i in range(first_brace, len(text)):
+        char = text[i]
+        
+        # Track if we are inside a string to ignore braces in string literals
+        if char == '"' and not escape:
+            in_string = not in_string
+        
+        # Track escape characters inside string
+        if char == '\\' and in_string:
+            escape = not escape
+        else:
+            escape = False
+
+        if not in_string:
+            if char == '{':
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    # Found the end of the JSON object
+                    candidate = text[first_brace:i + 1]
+                    try:
+                        json.loads(candidate)
+                        return candidate
+                    except json.JSONDecodeError:
+                        pass
+    
+    # 4. Simple non-greedy regex fallback
+    match = re.search(r"(\{[\s\S]*?\})", text)
+    if match:
+        return match.group(1).strip()
+
+    return text
+
 
 class BaseLLMProvider(Protocol):
     async def generate_json(self, prompt: str, expected_schema: Type[BaseModel]) -> tuple[BaseModel, UsageStats]:

@@ -4,7 +4,8 @@ import logging
 import time
 import httpx
 from typing import Type
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError as PydanticValidationError
+from taskforge.exceptions import ValidationError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from taskforge.config import settings
@@ -113,7 +114,7 @@ class TaskForgeEngine:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=8),
-        retry=retry_if_exception_type((ValidationError, httpx.HTTPError, ValueError, TimeoutError)),
+        retry=retry_if_exception_type((PydanticValidationError, httpx.HTTPError, ValueError, TimeoutError)),
         reraise=True,
         before_sleep=lambda retry_state: logger.warning(
             f"Error occurred. Retrying decompose_goal attempt {retry_state.attempt_number}..."
@@ -128,10 +129,10 @@ class TaskForgeEngine:
           3. Refine (PM): Calculate dependencies and validate.
         """
         if not goal or not goal.strip():
-            raise ValueError("Goal cannot be empty")
+            raise ValidationError("Goal cannot be empty")
 
         if len(goal) > self.config.MAX_INPUT_LENGTH:
-            raise ValueError(f"Goal exceeds maximum length of {self.config.MAX_INPUT_LENGTH} characters")
+            raise ValidationError(f"Goal exceeds maximum length of {self.config.MAX_INPUT_LENGTH} characters")
 
         logger.info(f"Decomposing goal: '{goal}'")
 

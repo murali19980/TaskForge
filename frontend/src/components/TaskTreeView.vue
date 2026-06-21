@@ -282,15 +282,17 @@
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
         </svg>
         <h4 class="font-semibold text-surface-200">Visual Graph Unavailable</h4>
-        <p class="text-xs text-surface-500 mt-1 max-w-sm">There was an issue initializing the Cytoscape DAG engine. Refer to the list of tasks above for dependency lines.</p>
+        <p class="text-xs text-surface-550 mt-1 max-w-sm">There was an issue initializing the Cytoscape DAG engine. Refer to the list of tasks above for dependency lines.</p>
       </div>
 
-      <!-- Graph mount point -->
       <div ref="graphContainer" class="w-full h-full" />
     </div>
 
-    <!-- Hidden print-only container for PDF/Word export -->
-    <div id="print-export-container" class="fixed -left-[9999px] -top-[9999px] w-[800px] p-8 bg-[#030712] text-[#cbd5e1] space-y-8 rounded-2xl border border-surface-800">
+    <!-- Hidden print-only container -->
+    <div 
+      ref="printContainer" 
+      class="hidden-print-element w-[800px] p-8 bg-[#030712] text-[#cbd5e1] space-y-8 rounded-2xl border border-surface-800"
+    >
       <div class="text-center space-y-2 border-b border-surface-800 pb-6">
         <h1 class="text-2xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-primary-400 to-accent-400">TaskForge Project Plan</h1>
         <p class="text-sm text-surface-400">Goal: {{ taskTree.goal }}</p>
@@ -340,16 +342,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, nextTick, onBeforeUnmount, onMounted } from 'vue'
 import type { TaskTree } from '../types'
-import cytoscape from 'cytoscape'
-import dagre from 'cytoscape-dagre'
 import html2canvas from 'html2canvas'
-import { jsPDF } from 'jspdf'
+import jsPDF from 'jspdf'
 import { saveAs } from 'file-saver'
-
-// Register cytoscape layout plugin
-cytoscape.use(dagre)
 
 const props = defineProps<{
   taskTree: TaskTree | null
@@ -362,7 +359,8 @@ const props = defineProps<{
 const activeCategory = ref<any>(null)
 const showGraph = ref(true)
 const graphError = ref(false)
-const graphContainer = ref<HTMLElement>()
+const graphContainer = ref<HTMLElement | null>(null)
+const printContainer = ref<HTMLElement | null>(null)
 const isExporting = ref(false)
 const showExportDropdown = ref(false)
 
@@ -441,13 +439,21 @@ function getCategoryIcon(name: string) {
   return icons[hash % icons.length]
 }
 
-function renderGraph() {
+async function renderGraph() {
   if (!graphContainer.value || !props.taskTree) return
 
   // Reset error flag
   graphError.value = false
 
   try {
+    const cytoscape = (await import('cytoscape')).default
+    const dagre = (await import('cytoscape-dagre')).default
+    try {
+      cytoscape.use(dagre)
+    } catch (e) {
+      // Ignore already registered error
+    }
+
     // Destroy previous instance to avoid conflicts/memory leaks
     if (cyInstance) {
       cyInstance.destroy()
@@ -604,20 +610,26 @@ watch([showGraph, () => props.taskTree], async ([show, tree]) => {
   }
 }, { deep: true, flush: 'post' })
 
+onMounted(() => {
+  if (showGraph.value && props.taskTree) {
+    renderGraph()
+  }
+})
+
 // Export PDF functionality
 async function exportPdf() {
   isExporting.value = true
   showExportDropdown.value = false
   
   await nextTick()
-  const printContainer = document.getElementById('print-export-container')
-  if (!printContainer) {
+  const printEl = printContainer.value
+  if (!printEl) {
     isExporting.value = false
     return
   }
 
   try {
-    const canvas = await html2canvas(printContainer, {
+    const canvas = await html2canvas(printEl, {
       useCORS: true,
       scale: 2,
       backgroundColor: '#030712',
@@ -751,6 +763,15 @@ onBeforeUnmount(() => {
 
 .animate-zoom-in {
   animation: zoomIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.hidden-print-element {
+  position: fixed;
+  z-index: -100;
+  opacity: 0.01;
+  pointer-events: none;
+  top: 0;
+  left: 0;
 }
 </style>
 

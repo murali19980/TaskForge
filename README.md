@@ -6,6 +6,45 @@ It operates in a hybrid mode, utilizing cloud-hosted OpenRouter models for archi
 
 ---
 
+## Visual Dashboard
+
+![Dashboard Preview](dashboard_preview.png)
+
+---
+
+## Architecture & Workflow
+
+TaskForge utilizes a Map-Reduce pipeline to decompose complex goals. The core flow is summarized below:
+
+```
+                  +--------------------------------+
+                  |  Vue 3 / Tailwind Client App   |
+                  +---------------+----------------+
+                                  |
+                   SSE / HTTP     |  (serves static_dist/)
+                                  v
+                  +---------------+----------------+
+                  |  FastAPI Backend Controller    |
+                  +---------------+----------------+
+                                  |
+                                  v
+                  +---------------+----------------+
+                  |    TaskForge Engine (Pipeline) |
+                  +---------------+----------------+
+                                  |
+          +-----------------------+-----------------------+
+          |                       |                       |
+          v                       v                       v
+ [Map: Architect]        [Reduce: Specialists]       [Refine: PM]
+  Create Categories        Detail Tasks per Cat       Build & Validate DAG
+```
+
+1. **Map (Architect)**: Analyzes the goal and structures high-level categories.
+2. **Reduce (Specialists)**: Concurrently generates granular task listings for each category.
+3. **Refine (Project Manager)**: Calculates inter-task dependencies and validates the resulting DAG (cycle prevention & topological sorting).
+
+---
+
 ## Key Features
 
 - **Recursive Map-Reduce Decomposition**:
@@ -66,6 +105,8 @@ Open `.env` and fill in:
 
 ## Running the Application
 
+TaskForge includes an automated runner script (`run.py`) which checks dependencies, builds the frontend Vue 3 application into `static_dist/`, and launches the FastAPI backend.
+
 ### 1. Start Local Ollama Models
 Ensure Ollama is running and download the default model:
 ```bash
@@ -73,20 +114,18 @@ ollama serve
 ollama pull qwen2.5-coder:3b
 ```
 
-### 2. Start the Backend API (FastAPI)
-Launch the FastAPI uvicorn server:
+### 2. Run the Unified Application
+Run the setup and startup script:
 ```bash
-uvicorn src.taskforge.main:app --reload --port 8000
+python run.py
 ```
-- Interactive Swagger docs are available at `http://127.0.0.1:8000/docs`.
-- Health check auditing is at `http://127.0.0.1:8000/health`.
+This script will:
+1. Audit and install Node/npm dependencies for the Vue client.
+2. Compile and build the frontend assets into `static_dist/`.
+3. Launch the FastAPI server on `http://localhost:8000`.
+4. Automatically open your browser to the TaskForge Dashboard.
 
-### 3. Start the Frontend Dashboard (Streamlit)
-In a new terminal window (with `.venv` activated), run the dashboard UI:
-```bash
-streamlit run frontend/streamlit_app.py
-```
-Access the application dashboard at `http://localhost:8501`.
+*Note: You can skip compiling the frontend if it's already built by running `python run.py --skip-build`.*
 
 ---
 

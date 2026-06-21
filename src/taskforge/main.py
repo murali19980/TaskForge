@@ -10,7 +10,7 @@ import asyncio
 import os
 import secrets
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError as PydanticValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 import httpx
@@ -19,6 +19,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import _rate_limit_exceeded_handler
 
+from taskforge.exceptions import ValidationError
 from taskforge.config import settings
 from taskforge.database import init_db, get_session, Project
 from taskforge.models import TaskTree, UsageStats, DecomposeResponse
@@ -98,17 +99,17 @@ async def verify_api_key(credentials: Optional[HTTPAuthorizationCredentials] = D
         )
     return credentials.credentials
 
-@app.exception_handler(ValidationError)
-async def validation_exception_handler(request, exc: ValidationError):
+@app.exception_handler(PydanticValidationError)
+async def validation_exception_handler(request, exc: PydanticValidationError):
     logger.error(f"Pydantic validation error: {exc.errors()}")
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={"detail": exc.errors(), "message": "Structured output validation failed"}
     )
 
-@app.exception_handler(ValueError)
-async def value_error_handler(request, exc: ValueError):
-    logger.error(f"ValueError raised: {str(exc)}")
+@app.exception_handler(ValidationError)
+async def validation_error_handler(request, exc: ValidationError):
+    logger.error(f"ValidationError raised: {str(exc)}")
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
         content={"detail": str(exc), "message": "Invalid request parameter"}
@@ -192,8 +193,8 @@ async def decompose(
         return response
     except HTTPException:
         raise
-    except ValueError as e:
-        logger.error(f"ValueError during decomposition: {str(e)}")
+    except ValidationError as e:
+        logger.error(f"ValidationError during decomposition: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
@@ -272,8 +273,8 @@ async def decompose_stream(
                     await db.flush()
 
                     await queue.put({"event": "done", "data": response.model_dump()})
-                except ValueError as ex:
-                    logger.error(f"ValueError during stream decomposition: {str(ex)}")
+                except ValidationError as ex:
+                    logger.error(f"ValidationError during stream decomposition: {str(ex)}")
                     await queue.put({"event": "error", "message": str(ex)})
                 except Exception as ex:
                     logger.exception("Decomposition stream failed in run_decomposition")
@@ -290,8 +291,8 @@ async def decompose_stream(
                     break
                 yield f"data: {json.dumps(item)}\n\n"
 
-        except ValueError as e:
-            logger.error(f"ValueError in event generator: {str(e)}")
+        except ValidationError as e:
+            logger.error(f"ValidationError in event generator: {str(e)}")
             yield f"data: {json.dumps({'event': 'error', 'message': str(e)})}\n\n"
         except Exception as e:
             logger.exception("Error in event generator")

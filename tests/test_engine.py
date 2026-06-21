@@ -1,6 +1,7 @@
 import pytest
 import asyncio
-from pydantic import ValidationError
+from pydantic import ValidationError as PydanticValidationError
+from taskforge.exceptions import ValidationError
 from taskforge.engine import TaskForgeEngine
 from taskforge.llm_provider import MockLLMProvider, FailingMockLLM, DependencyMapResponse
 from taskforge.models import CategoriesResponse, TasksResponse, TaskTree, DecomposeResponse, UsageStats
@@ -91,7 +92,7 @@ async def test_engine_raises_on_empty_goal():
         specialist_provider=mock_p,
         refiner_provider=mock_p
     )
-    with pytest.raises(ValueError, match="Goal cannot be empty"):
+    with pytest.raises(ValidationError, match="Goal cannot be empty"):
         await engine.decompose_goal("")
 
 @pytest.mark.asyncio
@@ -111,7 +112,7 @@ async def test_engine_invalid_dependencies_handling():
         refiner_provider=bad_provider
     )
 
-    with pytest.raises(ValidationError):
+    with pytest.raises(PydanticValidationError):
         await engine.decompose_goal("Build a web app")
 
 @pytest.mark.asyncio
@@ -171,6 +172,6 @@ async def test_engine_raises_on_long_goal():
         refiner_provider=mock_p
     )
     long_goal = "a" * (engine.config.MAX_INPUT_LENGTH + 1)
-    with pytest.raises(ValueError, match="Goal exceeds maximum length of"):
+    with pytest.raises(ValidationError, match="Goal exceeds maximum length of"):
         await engine.decompose_goal(long_goal)
 
