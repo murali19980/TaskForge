@@ -226,3 +226,24 @@ async def test_decompose_endpoint_rate_limiting():
     finally:
         limiter.reset()
         limiter.enabled = False
+
+
+@pytest.mark.asyncio
+async def test_decompose_endpoint_unexpected_exception_generic_message(monkeypatch):
+    # Mock decompose_goal to raise an unexpected Exception
+    async def mock_decompose_fail(*args, **kwargs):
+        raise RuntimeError("DB connection pool exhausted / raw internal trace details")
+    
+    engine = override_get_engine()
+    monkeypatch.setattr(engine, "decompose_goal", mock_decompose_fail)
+    app.dependency_overrides[get_engine] = lambda: engine
+    
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            response = await ac.post("/decompose", json={"goal": "Trigger error"})
+            assert response.status_code == 500
+            data = response.json()
+            assert data["detail"] == "Internal decomposition error. Check server logs."
+    finally:
+        app.dependency_overrides[get_engine] = override_get_engine
+

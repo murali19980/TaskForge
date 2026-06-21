@@ -1,7 +1,16 @@
 import logging
+import os
+from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
 from pydantic import field_validator
+
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+
+db_env_path = os.getenv("TASKFORGE_DB_PATH")
+if db_env_path:
+    DB_PATH = Path(db_env_path).resolve()
+else:
+    DB_PATH = BASE_DIR / "taskforge.db"
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -13,7 +22,7 @@ class Settings(BaseSettings):
     OPENROUTER_MODEL: str = "google/gemini-2.5-flash:free"
     OPENROUTER_MODELS: str = ""
     OPENROUTER_MAX_CONCURRENT: int = 10
-    DATABASE_URL: str = "sqlite+aiosqlite:///./taskforge.db"
+    DATABASE_URL: str = f"sqlite+aiosqlite:///{DB_PATH}"
     CORS_ORIGINS: str = ""
     API_KEY: str | None = None
     LOG_LEVEL: str = "INFO"
@@ -61,3 +70,5 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger("taskforge")
+logger.info(f"Database path resolved to: {DB_PATH}")
+

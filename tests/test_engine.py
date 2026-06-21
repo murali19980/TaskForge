@@ -160,3 +160,17 @@ async def test_engine_fallback_chain(mocker):
     assert result.categories == ["LocalCategory"]
     assert mock_generate.call_count == 2
     assert mock_ollama_generate.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_engine_raises_on_long_goal():
+    mock_p = MockLLMProvider()
+    engine = TaskForgeEngine(
+        architect_provider=mock_p,
+        specialist_provider=mock_p,
+        refiner_provider=mock_p
+    )
+    long_goal = "a" * (engine.config.MAX_INPUT_LENGTH + 1)
+    with pytest.raises(ValueError, match="Goal exceeds maximum length of"):
+        await engine.decompose_goal(long_goal)
+

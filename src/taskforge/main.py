@@ -192,11 +192,17 @@ async def decompose(
         return response
     except HTTPException:
         raise
+    except ValueError as e:
+        logger.error(f"ValueError during decomposition: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
     except Exception as e:
         logger.exception("Goal decomposition failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Decomposition failed: {str(e)}"
+            detail="Internal decomposition error. Check server logs."
         )
 
 @app.post("/decompose/stream")
@@ -266,9 +272,12 @@ async def decompose_stream(
                     await db.flush()
 
                     await queue.put({"event": "done", "data": response.model_dump()})
+                except ValueError as ex:
+                    logger.error(f"ValueError during stream decomposition: {str(ex)}")
+                    await queue.put({"event": "error", "message": str(ex)})
                 except Exception as ex:
                     logger.exception("Decomposition stream failed in run_decomposition")
-                    await queue.put({"event": "error", "message": str(ex)})
+                    await queue.put({"event": "error", "message": "Internal decomposition error. Check server logs."})
                 finally:
                     await queue.put(None)
 
@@ -281,9 +290,12 @@ async def decompose_stream(
                     break
                 yield f"data: {json.dumps(item)}\n\n"
 
+        except ValueError as e:
+            logger.error(f"ValueError in event generator: {str(e)}")
+            yield f"data: {json.dumps({'event': 'error', 'message': str(e)})}\n\n"
         except Exception as e:
             logger.exception("Error in event generator")
-            yield f"data: {json.dumps({'event': 'error', 'message': str(e)})}\n\n"
+            yield f"data: {json.dumps({'event': 'error', 'message': 'Internal decomposition error. Check server logs.'})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -367,13 +379,8 @@ async def health(db: AsyncSession = Depends(get_session), _auth = Depends(verify
                 res = await client.get("https://openrouter.ai/api/v1/auth/key", headers=headers)
                 if res.status_code == 200:
                     health_status["openrouter"] = "healthy"
-                    try:
-                        key_data = res.json().get("data", {})
-                        health_status["openrouter_data"] = key_data
-                    except Exception:
-                        pass
                 else:
-                    health_status["openrouter"] = f"unhealthy (status {res.status_code})"
+                    health_status["openrouter"] = "unhealthy"
                     health_status["status"] = "unhealthy"
         except Exception as e:
             logger.error(f"Health check failed to contact OpenRouter: {str(e)}")

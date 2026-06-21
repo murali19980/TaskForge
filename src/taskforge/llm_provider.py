@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import asyncio
+import warnings
 from typing import Type, Protocol, Any
 import httpx
 from pydantic import BaseModel
@@ -15,6 +16,22 @@ from taskforge.models import (
 from taskforge.config import settings
 
 logger = logging.getLogger("taskforge.llm_provider")
+
+def _strip_markdown_json(text: str) -> str:
+    """Removes code fences and strips anything outside the first '{' and last '}'."""
+    text = text.strip()
+    # 1. Strip markdown code fences if present (e.g. ```json, ```js, ```)
+    text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+    text = text.strip()
+
+    # 2. Extract content starting from the first '{' to the last '}'
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        text = text[first_brace:last_brace + 1]
+
+    return text.strip()
 
 class BaseLLMProvider(Protocol):
     async def generate_json(self, prompt: str, expected_schema: Type[BaseModel]) -> tuple[BaseModel, UsageStats]:
@@ -51,6 +68,9 @@ class OllamaProvider:
                 response_text = data.get("response", "").strip()
 
                 logger.debug(f"Raw Ollama response: {response_text}")
+
+                # Strip markdown wrappers
+                response_text = _strip_markdown_json(response_text)
 
                 # Parse response_text into JSON
                 parsed_json = json.loads(response_text)
@@ -147,6 +167,9 @@ class OpenRouterProvider:
                             response_text = data["choices"][0]["message"]["content"].strip()
                             logger.debug(f"Raw OpenRouter response: {response_text}")
 
+                            # Strip markdown wrappers
+                            response_text = _strip_markdown_json(response_text)
+
                             parsed_json = json.loads(response_text)
                             model_inst = expected_schema.model_validate(parsed_json)
 
@@ -166,7 +189,14 @@ class OpenRouterProvider:
                                 "openrouter/free": (0.0, 0.0),
                             }
 
-                            rates = PRICING.get(model, (0.150, 0.60))  # Default fallback gpt-4o-mini
+                            if model in PRICING:
+                                rates = PRICING[model]
+                            elif model.endswith(":free") or model == "openrouter/free":
+                                rates = (0.0, 0.0)
+                            else:
+                                logger.critical(f"CRITICAL WARNING: Unknown non-free model '{model}' requested. Using fallback rates (0.0, 0.0) but cost may be incurred.")
+                                warnings.warn(f"Model '{model}' is not configured in pricing dictionary. Costs may occur.", UserWarning)
+                                rates = (0.0, 0.0)
                             input_cost = (prompt_tokens * rates[0]) / 1_000_000
                             output_cost = (completion_tokens * rates[1]) / 1_000_000
                             estimated_cost = input_cost + output_cost
@@ -334,9 +364,7 @@ class MockLLMProvider:
 
         elif expected_schema is DependencyMapResponse:
             # Parse prompt to see what task IDs are in the tree
-            found_ids = set(re.findall(r'"id":\s*["\']([^"\']+)["\']', prompt))
-            if not found_ids:
-                found_ids = set(re.findall(r"'id':\s*['\"]([^'\"]+)['\"]", prompt))
+            found_ids = re.findall(r'"id"\s*:\s*"([^"]+)"', prompt)
 
             dependencies = {}
             for task_id in found_ids:

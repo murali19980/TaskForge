@@ -131,8 +131,7 @@ class TaskForgeEngine:
             raise ValueError("Goal cannot be empty")
 
         if len(goal) > self.config.MAX_INPUT_LENGTH:
-            logger.warning(f"Goal length {len(goal)} exceeds limit {self.config.MAX_INPUT_LENGTH}, truncating...")
-            goal = goal[:self.config.MAX_INPUT_LENGTH]
+            raise ValueError(f"Goal exceeds maximum length of {self.config.MAX_INPUT_LENGTH} characters")
 
         logger.info(f"Decomposing goal: '{goal}'")
 
@@ -197,9 +196,9 @@ class TaskForgeEngine:
             await on_progress({"event": "refiner_start"})
 
         temp_tree = TaskTree(goal=goal, categories=categories)
-        tree_dict = temp_tree.model_dump()
+        tree_json = temp_tree.model_dump_json()
 
-        refiner_prompt = REFINER_PROMPT.format(goal=prompt_goal, tree=str(tree_dict))
+        refiner_prompt = REFINER_PROMPT.format(goal=prompt_goal, tree=tree_json)
         dep_resp, ref_usage = await self._call_llm_with_timeout(
             self.refiner_provider, refiner_prompt, DependencyMapResponse
         )
