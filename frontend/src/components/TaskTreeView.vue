@@ -285,7 +285,7 @@
         <p class="text-xs text-surface-550 mt-1 max-w-sm">There was an issue initializing the Cytoscape DAG engine. Refer to the list of tasks above for dependency lines.</p>
       </div>
 
-      <div ref="graphContainer" class="w-full h-full" />
+      <div ref="graphContainer" class="w-full h-full min-h-[500px]" />
     </div>
 
     <!-- Hidden print-only container -->
@@ -347,6 +347,7 @@ import type { TaskTree } from '../types'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
 import { saveAs } from 'file-saver'
+import escapeHtml from 'escape-html'
 
 const props = defineProps<{
   taskTree: TaskTree | null
@@ -440,6 +441,7 @@ function getCategoryIcon(name: string) {
 }
 
 async function renderGraph() {
+  await nextTick()
   if (!graphContainer.value || !props.taskTree) return
 
   // Reset error flag
@@ -618,6 +620,13 @@ onMounted(() => {
 
 // Export PDF functionality
 async function exportPdf() {
+  if (totalTasksCount.value > 25) {
+    const proceed = window.confirm(
+      `This task tree is large (${totalTasksCount.value} tasks). The PDF export might span multiple pages and take a few seconds. Do you want to proceed?`
+    )
+    if (!proceed) return
+  }
+
   isExporting.value = true
   showExportDropdown.value = false
   
@@ -660,15 +669,7 @@ async function exportPdf() {
   }
 }
 
-// HTML escape helper – prevents XSS in generated Word/HTML documents (IMP-4)
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;')
-}
+// escapeHtml is now imported from 'escape-html' package (IMP-4, IMP-10)
 
 // Export Word document functionality
 async function exportWord() {

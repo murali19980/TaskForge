@@ -26,6 +26,12 @@
           <div>
             <h3 class="text-sm font-semibold text-surface-200 mb-1">API Authentication Key</h3>
             <p class="text-xs text-surface-500 font-light leading-relaxed">Configure the Bearer API Key required to authenticate request payloads sent to TaskForge FastAPI endpoints.</p>
+            <p class="text-[11px] text-amber-500/90 font-medium leading-relaxed mt-2 bg-amber-500/5 border border-amber-500/10 rounded-lg p-2 flex items-start gap-1.5">
+              <svg class="w-3.5 h-3.5 mt-0.5 shrink-0 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+              <span>API key stored in session memory – cleared when tab closes. Do not use production secrets.</span>
+            </p>
           </div>
 
           <div class="space-y-2">
