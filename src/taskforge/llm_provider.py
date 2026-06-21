@@ -1,12 +1,13 @@
 import json
 import logging
 import re
+import asyncio
 from typing import Type, Protocol, Any
 import httpx
 from pydantic import BaseModel
 from taskforge.models import (
-    CategoriesResponse, 
-    TasksResponse, 
+    CategoriesResponse,
+    TasksResponse,
     DependencyMapResponse,
     Task,
     UsageStats
@@ -28,7 +29,7 @@ class OllamaProvider:
 
     async def generate_json(self, prompt: str, expected_schema: Type[BaseModel]) -> tuple[BaseModel, UsageStats]:
         url = f"{self.host.rstrip('/')}/api/generate"
-        
+
         # We pass the schema directly to Ollama's format field to force JSON conforming to the schema
         payload = {
             "model": self.model,
@@ -39,38 +40,38 @@ class OllamaProvider:
                 "temperature": 0.1
             }
         }
-        
+
         logger.debug(f"Sending payload to Ollama: {payload}")
-        
+
         async with httpx.AsyncClient(timeout=120.0) as client:
             try:
                 response = await client.post(url, json=payload)
                 response.raise_for_status()
                 data = response.json()
                 response_text = data.get("response", "").strip()
-                
+
                 logger.debug(f"Raw Ollama response: {response_text}")
-                
+
                 # Parse response_text into JSON
                 parsed_json = json.loads(response_text)
-                
+
                 # Validate using Pydantic model
                 model_inst = expected_schema.model_validate(parsed_json)
-                
+
                 # Extract token usage from Ollama metadata
                 prompt_tokens = data.get("prompt_eval_count", 0)
                 completion_tokens = data.get("eval_count", 0)
                 total_tokens = prompt_tokens + completion_tokens
-                
+
                 usage = UsageStats(
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
                     total_tokens=total_tokens,
                     estimated_cost_usd=0.0
                 )
-                
+
                 return model_inst, usage
-                
+
             except httpx.HTTPStatusError as e:
                 logger.error(f"Ollama returned HTTP error status: {e.response.status_code}")
                 raise
@@ -101,7 +102,7 @@ class OpenRouterProvider:
             "HTTP-Referer": "http://localhost:8000",
             "X-Title": "TaskForge"
         }
-        
+
         # Enforce json_object mode and pass the expected schema description in the system prompt
         schema_desc = json.dumps(expected_schema.model_json_schema(), indent=2)
         system_prompt = (
@@ -110,7 +111,7 @@ class OpenRouterProvider:
             f"{schema_desc}\n"
             "Output only the raw JSON object, without markdown block wrappers or extra text."
         )
-        
+
         payload = {
             "model": self.model,
             "messages": [
@@ -120,67 +121,89 @@ class OpenRouterProvider:
             "response_format": {"type": "json_object"},
             "temperature": 0.1
         }
-        
+
         logger.debug(f"Sending payload to OpenRouter: {payload}")
-        
+
+        max_attempts = 3
         async with httpx.AsyncClient(timeout=120.0) as client:
-            try:
-                response = await client.post(url, json=payload, headers=headers)
-                response.raise_for_status()
-                data = response.json()
-                
-                # Catch API errors
-                if "error" in data:
-                    err_msg = data["error"].get("message", "Unknown OpenRouter error")
-                    raise ValueError(f"OpenRouter API returned error: {err_msg}")
-                    
-                response_text = data["choices"][0]["message"]["content"].strip()
-                logger.debug(f"Raw OpenRouter response: {response_text}")
-                
-                parsed_json = json.loads(response_text)
-                model_inst = expected_schema.model_validate(parsed_json)
-                
-                # Extract token usage
-                usage_data = data.get("usage", {})
-                prompt_tokens = usage_data.get("prompt_tokens", 0)
-                completion_tokens = usage_data.get("completion_tokens", 0)
-                total_tokens = usage_data.get("total_tokens", 0)
-                
-                # Price per 1M tokens mapping: (input_cost_usd, output_cost_usd)
-                PRICING = {
-                    "google/gemini-2.5-flash:free": (0.0, 0.0),
-                    "google/gemini-2.5-flash": (0.075, 0.30),
-                    "mistralai/mistral-nemo:free": (0.0, 0.0),
-                    "mistralai/mistral-nemo": (0.17, 0.17),
-                    "openai/gpt-4o-mini": (0.150, 0.60),
-                }
-                
-                rates = PRICING.get(self.model, (0.150, 0.60))  # Default fallback gpt-4o-mini
-                input_cost = (prompt_tokens * rates[0]) / 1_000_000
-                output_cost = (completion_tokens * rates[1]) / 1_000_000
-                estimated_cost = input_cost + output_cost
-                
-                usage = UsageStats(
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    total_tokens=total_tokens,
-                    estimated_cost_usd=estimated_cost
-                )
-                
-                return model_inst, usage
-                
-            except httpx.HTTPStatusError as e:
-                logger.error(f"OpenRouter returned HTTP error status: {e.response.status_code} - {e.response.text}")
-                raise
-            except httpx.HTTPError as e:
-                logger.error(f"HTTP error contacting OpenRouter: {str(e)}")
-                raise
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to decode response as JSON: {response_text}. Error: {str(e)}")
-                raise ValueError(f"OpenRouter returned invalid JSON: {str(e)}")
-            except Exception as e:
-                logger.error(f"Validation or unexpected error in OpenRouter call: {str(e)}")
-                raise
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    response = await client.post(url, json=payload, headers=headers)
+                    response.raise_for_status()
+                    data = response.json()
+
+                    # Catch API errors
+                    if "error" in data:
+                        err_msg = data["error"].get("message", "Unknown OpenRouter error")
+                        raise ValueError(f"OpenRouter API returned error: {err_msg}")
+
+                    response_text = data["choices"][0]["message"]["content"].strip()
+                    logger.debug(f"Raw OpenRouter response: {response_text}")
+
+                    parsed_json = json.loads(response_text)
+                    model_inst = expected_schema.model_validate(parsed_json)
+
+                    # Extract token usage
+                    usage_data = data.get("usage", {})
+                    prompt_tokens = usage_data.get("prompt_tokens", 0)
+                    completion_tokens = usage_data.get("completion_tokens", 0)
+                    total_tokens = usage_data.get("total_tokens", 0)
+
+                    # Price per 1M tokens mapping: (input_cost_usd, output_cost_usd)
+                    PRICING = {
+                        "google/gemini-2.5-flash:free": (0.0, 0.0),
+                        "google/gemini-2.5-flash": (0.075, 0.30),
+                        "mistralai/mistral-nemo:free": (0.0, 0.0),
+                        "mistralai/mistral-nemo": (0.17, 0.17),
+                        "openai/gpt-4o-mini": (0.150, 0.60),
+                        "openrouter/free": (0.0, 0.0),
+                    }
+
+                    rates = PRICING.get(self.model, (0.150, 0.60))  # Default fallback gpt-4o-mini
+                    input_cost = (prompt_tokens * rates[0]) / 1_000_000
+                    output_cost = (completion_tokens * rates[1]) / 1_000_000
+                    estimated_cost = input_cost + output_cost
+
+                    usage = UsageStats(
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        total_tokens=total_tokens,
+                        estimated_cost_usd=estimated_cost
+                    )
+
+                    return model_inst, usage
+
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code == 429:
+                        retry_after = 2.0  # default backoff
+                        retry_after_hdr = e.response.headers.get("Retry-After")
+                        if retry_after_hdr:
+                            try:
+                                retry_after = float(retry_after_hdr)
+                            except ValueError:
+                                pass
+                        logger.warning(
+                            f"OpenRouter rate limit (429) hit. "
+                            f"Retry-After header: {retry_after_hdr}. "
+                            f"Waiting {retry_after}s before retry attempt {attempt}/{max_attempts}..."
+                        )
+                        if attempt == max_attempts:
+                            logger.error("Max rate limit retries reached.")
+                            raise
+                        await asyncio.sleep(retry_after)
+                        continue
+                    else:
+                        logger.error(f"OpenRouter returned HTTP error status: {e.response.status_code} - {e.response.text}")
+                        raise
+                except httpx.HTTPError as e:
+                    logger.error(f"HTTP error contacting OpenRouter: {str(e)}")
+                    raise
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to decode response as JSON: {response_text}. Error: {str(e)}")
+                    raise ValueError(f"OpenRouter returned invalid JSON: {str(e)}")
+                except Exception as e:
+                    logger.error(f"Validation or unexpected error in OpenRouter call: {str(e)}")
+                    raise
 
 class MockLLMProvider:
     """
@@ -276,7 +299,7 @@ class MockLLMProvider:
 
     async def generate_json(self, prompt: str, expected_schema: Type[BaseModel]) -> tuple[BaseModel, UsageStats]:
         usage = UsageStats(prompt_tokens=100, completion_tokens=150, total_tokens=250, estimated_cost_usd=0.00015)
-        
+
         # Check target schema type
         if expected_schema is CategoriesResponse:
             if re.search(r"web app|website", prompt, re.IGNORECASE):
@@ -291,7 +314,7 @@ class MockLLMProvider:
             # Try to identify category in prompt (e.g. Category to focus on: "Frontend")
             category_match = re.search(r"Category to focus on:\s*[\"']([^\"']+)[\"']", prompt, re.IGNORECASE)
             category_name = category_match.group(1) if category_match else "Development"
-            
+
             # Fetch predefined tasks or fallback to generic Development
             tasks = self.category_tasks.get(category_name, self.category_tasks["Development"])
             return TasksResponse(tasks=tasks), usage
@@ -301,13 +324,13 @@ class MockLLMProvider:
             found_ids = set(re.findall(r'"id":\s*["\']([^"\']+)["\']', prompt))
             if not found_ids:
                 found_ids = set(re.findall(r"'id':\s*['\"]([^'\"]+)['\"]", prompt))
-            
+
             dependencies = {}
             for task_id in found_ids:
                 deps = self.predefined_dependencies.get(task_id, [])
                 filtered_deps = [d for d in deps if d in found_ids]
                 dependencies[task_id] = filtered_deps
-                
+
             return DependencyMapResponse(dependencies=dependencies), usage
 
         raise ValueError(f"MockLLMProvider does not support target schema: {expected_schema}")

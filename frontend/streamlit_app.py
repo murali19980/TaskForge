@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import json
 import os
+import httpx
 from dotenv import load_dotenv
 
 # Load local environment settings if present
@@ -19,11 +20,11 @@ st.set_page_config(
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap');
-    
+
     html, body, [class*="css"] {
         font-family: 'Outfit', sans-serif;
     }
-    
+
     .main-title {
         font-size: 3rem;
         font-weight: 700;
@@ -32,13 +33,13 @@ st.markdown("""
         -webkit-text-fill-color: transparent;
         margin-bottom: 0.5rem;
     }
-    
+
     .sub-title {
         font-size: 1.2rem;
         color: #8892B0;
         margin-bottom: 2rem;
     }
-    
+
     .metric-card {
         background: rgba(255, 255, 255, 0.03);
         border: 1px solid rgba(255, 255, 255, 0.05);
@@ -47,12 +48,12 @@ st.markdown("""
         text-align: center;
         transition: transform 0.2s ease, border-color 0.2s ease;
     }
-    
+
     .metric-card:hover {
         transform: translateY(-2px);
         border-color: rgba(255, 255, 255, 0.15);
     }
-    
+
     .task-card {
         background: rgba(255, 255, 255, 0.02);
         border-left: 4px solid #FF3366;
@@ -63,20 +64,20 @@ st.markdown("""
         border-right: 1px solid rgba(255, 255, 255, 0.03);
         border-bottom: 1px solid rgba(255, 255, 255, 0.03);
     }
-    
+
     .task-header {
         display: flex;
         justify-content: space-between;
         align-items: center;
         margin-bottom: 0.5rem;
     }
-    
+
     .task-title {
         font-weight: 600;
         font-size: 1.1rem;
         color: #E2E8F0;
     }
-    
+
     .task-hours {
         font-size: 0.9rem;
         color: #FF9933;
@@ -85,13 +86,13 @@ st.markdown("""
         border-radius: 12px;
         font-weight: 600;
     }
-    
+
     .task-desc {
         color: #A0AEC0;
         font-size: 0.95rem;
         margin-bottom: 0.5rem;
     }
-    
+
     .task-dep {
         font-size: 0.85rem;
         color: #33CCFF;
@@ -110,6 +111,42 @@ ENV_API_KEY = os.getenv("API_KEY", "dev_api_key_123")
 # Sidebar Configuration
 st.sidebar.title("⚒️ Settings")
 api_key = st.sidebar.text_input("Bearer Token / API Key", value=ENV_API_KEY, type="password")
+
+st.sidebar.markdown("---")
+
+# Query backend /health to get status and OpenRouter quota
+try:
+    health_res = requests.get(f"{API_BASE_URL}/health", headers=get_headers(), timeout=5.0)
+    if health_res.status_code in (200, 503):
+        health_data = health_res.json()
+        st.sidebar.subheader("System Status")
+        db_status = "🟢" if health_data.get("database") == "healthy" else "🔴"
+        ollama_status = "🟢" if health_data.get("ollama") == "healthy" else "🔴"
+        or_status = health_data.get("openrouter", "unconfigured")
+        or_indicator = "🟢" if or_status == "healthy" else ("🔴" if or_status == "unhealthy" else "⚪")
+
+        st.sidebar.markdown(f"**Database**: {db_status} {health_data.get('database', 'unknown')}")
+        st.sidebar.markdown(f"**Ollama**: {ollama_status} {health_data.get('ollama', 'unknown')}")
+        st.sidebar.markdown(f"**OpenRouter**: {or_indicator} {or_status}")
+
+        or_data = health_data.get("openrouter_data")
+        if or_data:
+            st.sidebar.subheader("OpenRouter Quota")
+            rate_limit = or_data.get("rate_limit", {})
+            requests_limit = rate_limit.get("requests")
+            interval = rate_limit.get("interval")
+            if requests_limit:
+                st.sidebar.markdown(f"**Rate Limit**: {requests_limit} reqs / {interval}")
+
+            limit = or_data.get("limit")
+            usage = or_data.get("usage")
+            if limit is not None:
+                st.sidebar.markdown(f"**Usage**: ${usage:.5f} / ${limit:.5f}")
+                st.sidebar.markdown(f"**Remaining**: ${limit - usage:.5f}")
+            elif usage is not None:
+                st.sidebar.markdown(f"**Usage**: ${usage:.5f}")
+except Exception:
+    pass
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Recent Decompositions")
@@ -155,43 +192,103 @@ with st.container():
         max_chars=1000,
         height=100
     )
-    
+
     col1, col2 = st.columns([1, 4])
     with col1:
         submit_button = st.button("Decompose Goal", type="primary", use_container_width=True)
+
+# Action handler for form submission
+def render_specialists_progress(placeholder, completed_specialists, categories):
+    with placeholder.container():
+        st.write("🤖 **Specialists**: Category task generation in progress:")
+        total = len(categories)
+        if total > 0:
+            done_count = sum(1 for status in completed_specialists.values() if "Completed" in status)
+            progress_val = done_count / total
+            st.progress(progress_val, text=f"Processed {done_count}/{total} categories")
+
+        for cat in categories:
+            status = completed_specialists.get(cat, "Pending")
+            if "Completed" in status:
+                st.write(f" - ✅ **{cat}**: {status}")
+            elif status == "Running":
+                st.write(f" - ⏳ **{cat}**: Generating tasks...")
+            else:
+                st.write(f" - 💤 **{cat}**: Pending...")
 
 # Action handler for form submission
 if submit_button:
     if not goal_input.strip():
         st.error("Please enter a valid goal.")
     else:
-        with st.spinner("Decomposing goal (Architect mapping → Specialists detailing → PM refining)..."):
-            try:
-                # Trigger decomposition API request
-                payload = {"goal": goal_input}
-                res = requests.post(
-                    f"{API_BASE_URL}/decompose", 
-                    json=payload, 
-                    headers=get_headers(), 
-                    timeout=120.0  # High timeout for cloud/local LLM chain
-                )
-                
-                if res.status_code == 200:
-                    st.session_state["active_decomposition"] = res.json()
-                    st.success("Decomposition completed successfully!")
-                    st.rerun()
-                elif res.status_code == 401:
-                    st.error("Authentication failed: Invalid Bearer Token / API Key.")
-                elif res.status_code == 422:
-                    st.error(f"Validation Error: {res.json().get('detail', 'Malformed request')}")
-                else:
-                    st.error(f"Error ({res.status_code}): {res.json().get('detail', 'Internal server error')}")
-            except requests.exceptions.Timeout:
-                st.error("Request timed out. The LLM provider took too long to respond.")
-            except requests.exceptions.ConnectionError:
-                st.error("Could not connect to the backend API. Please ensure your FastAPI server is running on port 8000.")
-            except Exception as e:
-                st.error(f"An unexpected error occurred: {str(e)}")
+        if len(goal_input) > 2000:
+            st.error("Goal exceeds the maximum length of 2000 characters.")
+        else:
+            with st.status("Decomposing goal (initializing mapping)...") as status:
+                architect_status = st.empty()
+                specialist_status = st.empty()
+                refiner_status = st.empty()
+
+                categories = []
+                completed_specialists = {}
+
+                try:
+                    payload = {"goal": goal_input}
+                    headers = get_headers()
+
+                    with httpx.stream("POST", f"{API_BASE_URL}/decompose/stream", json=payload, headers=headers, timeout=120.0) as r:
+                        if r.status_code == 401:
+                            st.error("Authentication failed: Invalid Bearer Token / API Key.")
+                            status.update(label="Decomposition failed", state="error")
+                        elif r.status_code != 200:
+                            st.error(f"Error ({r.status_code}): Request failed.")
+                            status.update(label="Decomposition failed", state="error")
+                        else:
+                            for line in r.iter_lines():
+                                if line.startswith("data: "):
+                                    event_data = json.loads(line[6:])
+                                    event_type = event_data.get("event")
+
+                                    if event_type == "architect_start":
+                                        status.update(label="Decomposing goal (Architect running)...", state="running")
+                                        architect_status.markdown("⚡ **Architect**: Analyzing goal and mapping categories...")
+                                    elif event_type == "architect_done":
+                                        categories = event_data.get("categories", [])
+                                        architect_status.markdown(f"✅ **Architect**: Mapped {len(categories)} categories: {', '.join(categories)}")
+                                    elif event_type == "specialists_start":
+                                        status.update(label="Decomposing goal (Specialists running)...", state="running")
+                                        specialist_status.markdown("🤖 **Specialists**: Generating tasks for each category...")
+                                    elif event_type == "specialist_start":
+                                        cat = event_data.get("category")
+                                        completed_specialists[cat] = "Running"
+                                        render_specialists_progress(specialist_status, completed_specialists, categories)
+                                    elif event_type == "specialist_done":
+                                        cat = event_data.get("category")
+                                        count = event_data.get("task_count", 0)
+                                        completed_specialists[cat] = f"Completed ({count} tasks)"
+                                        render_specialists_progress(specialist_status, completed_specialists, categories)
+                                    elif event_type == "refiner_start":
+                                        status.update(label="Decomposing goal (Refiner running)...", state="running")
+                                        refiner_status.markdown("⛓️ **Refiner**: Resolving dependencies and finalizing tree...")
+                                    elif event_type == "refiner_done":
+                                        refiner_status.markdown("✅ **Refiner**: Dependency mapping and verification complete.")
+                                    elif event_type == "done":
+                                        status.update(label="Decomposition completed successfully!", state="complete")
+                                        st.session_state["active_decomposition"] = event_data.get("data")
+                                        st.success("Decomposition completed successfully!")
+                                        st.rerun()
+                                    elif event_type == "error":
+                                        st.error(f"Decomposition failed: {event_data.get('message')}")
+                                        status.update(label="Decomposition failed", state="error")
+                except httpx.TimeoutException:
+                    st.error("Request timed out. The LLM provider took too long to respond.")
+                    status.update(label="Decomposition failed", state="error")
+                except httpx.ConnectError:
+                    st.error("Could not connect to the backend API. Please ensure your FastAPI server is running on port 8000.")
+                    status.update(label="Decomposition failed", state="error")
+                except Exception as e:
+                    st.error(f"An unexpected error occurred: {str(e)}")
+                    status.update(label="Decomposition failed", state="error")
 
 # Display Active Decomposition Results
 if "active_decomposition" in st.session_state:
@@ -199,10 +296,10 @@ if "active_decomposition" in st.session_state:
     tree = data["task_tree"]
     usage = data["usage"]
     is_cached = data.get("cached", False)
-    
+
     st.markdown("---")
     st.subheader(f"Project Decomposed Goal: **{tree['goal']}**")
-    
+
     # Token Usage stats row
     col_tok1, col_tok2, col_tok3, col_tok4 = st.columns(4)
     with col_tok1:

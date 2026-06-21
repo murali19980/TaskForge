@@ -13,8 +13,8 @@ TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 # Setup in-memory database for testing isolation
 test_engine = create_async_engine(TEST_DATABASE_URL, echo=False)
 test_session_factory = async_sessionmaker(
-    bind=test_engine, 
-    expire_on_commit=False, 
+    bind=test_engine,
+    expire_on_commit=False,
     class_=AsyncSession
 )
 
@@ -59,18 +59,18 @@ async def test_decompose_endpoint_success():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         response = await ac.post("/decompose", json={"goal": "Build a web app"})
         assert response.status_code == 200
-        
+
         data = response.json()
         assert "task_tree" in data
         assert data["task_tree"]["goal"] == "Build a web app"
         assert len(data["task_tree"]["categories"]) > 0
-        
+
         # Verify schema structure of categories and tasks
         category = data["task_tree"]["categories"][0]
         assert "name" in category
         assert "tasks" in category
         assert len(category["tasks"]) > 0
-        
+
         task = category["tasks"][0]
         assert "id" in task
         assert "title" in task
@@ -117,7 +117,7 @@ async def test_decompose_caching():
         resp1 = await ac.post("/decompose", json={"goal": "Unique Cache Test"})
         assert resp1.status_code == 200
         assert resp1.json()["cached"] is False
-        
+
         # Second call - loaded from cache
         resp2 = await ac.post("/decompose", json={"goal": "Unique Cache Test"})
         assert resp2.status_code == 200
@@ -130,12 +130,12 @@ async def test_list_projects_pagination():
         await ac.post("/decompose", json={"goal": "Project A"})
         await ac.post("/decompose", json={"goal": "Project B"})
         await ac.post("/decompose", json={"goal": "Project C"})
-        
+
         # Test Limit 2
         res_limit = await ac.get("/projects?limit=2")
         assert res_limit.status_code == 200
         assert len(res_limit.json()) == 2
-        
+
         # Test Offset 2
         res_offset = await ac.get("/projects?limit=2&offset=2")
         assert res_offset.status_code == 200
@@ -153,3 +153,31 @@ async def test_health_check_endpoint():
         assert "database" in data
         assert "ollama" in data
         assert "openrouter" in data
+
+@pytest.mark.asyncio
+async def test_decompose_endpoint_max_input_length():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        long_goal = "x" * 2001
+        response = await ac.post("/decompose", json={"goal": long_goal})
+        assert response.status_code == 422
+
+@pytest.mark.asyncio
+async def test_decompose_endpoint_max_input_length_config(monkeypatch):
+    from taskforge.config import settings
+    monkeypatch.setattr(settings, "MAX_INPUT_LENGTH", 10)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        response = await ac.post("/decompose", json={"goal": "Goal longer than 10 chars"})
+        assert response.status_code == 400
+        assert "Goal length exceeds the maximum allowed limit" in response.json()["detail"]
+
+@pytest.mark.asyncio
+async def test_decompose_stream_endpoint():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        async with ac.stream("POST", "/decompose/stream", json={"goal": "Build website"}) as response:
+            assert response.status_code == 200
+            lines = []
+            async for line in response.aiter_lines():
+                if line:
+                    lines.append(line)
+            assert len(lines) > 0
+            assert lines[0].startswith("data: ")

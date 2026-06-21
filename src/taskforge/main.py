@@ -2,8 +2,10 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, status, Security
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+import json
+import asyncio
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,13 +21,13 @@ from taskforge.engine import TaskForgeEngine
 logger = logging.getLogger("taskforge.main")
 
 class DecomposeRequest(BaseModel):
-    goal: str = Field(..., min_length=1, max_length=1000, description="The high-level goal to decompose")
+    goal: str = Field(..., min_length=1, max_length=2000, description="The high-level goal to decompose")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: initialize database tables
     await init_db()
-    
+
     # Check Ollama connectivity and log status
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
@@ -36,7 +38,7 @@ async def lifespan(app: FastAPI):
                 logger.warning(f"Ollama check returned status {res.status_code} at {settings.OLLAMA_HOST}")
     except Exception as e:
         logger.error(f"Ollama is unreachable at startup on {settings.OLLAMA_HOST}: {str(e)}")
-        
+
     yield
     # Shutdown
     pass
@@ -100,7 +102,7 @@ def get_engine() -> TaskForgeEngine:
         architect = OllamaProvider()
         specialist = OllamaProvider()
         refiner = OllamaProvider()
-        
+
     return TaskForgeEngine(
         architect_provider=architect,
         specialist_provider=specialist,
@@ -115,6 +117,13 @@ async def decompose(
     _auth = Depends(verify_api_key)
 ):
     try:
+        # Check input length cap
+        if len(request.goal) > settings.MAX_INPUT_LENGTH:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Goal length exceeds the maximum allowed limit of {settings.MAX_INPUT_LENGTH} characters."
+            )
+
         # 1. Database-backed cache check
         result = await db.execute(
             select(Project).filter(Project.goal == request.goal).order_by(Project.created_at.desc())
@@ -133,7 +142,14 @@ async def decompose(
 
         # 2. Run the decomposition engine
         response = await engine.decompose_goal(request.goal)
-        
+
+        # Check cost limit
+        if response.usage.estimated_cost_usd > settings.MAX_COST_PER_REQUEST:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Estimated request cost (${response.usage.estimated_cost_usd:.5f}) exceeds the limit of ${settings.MAX_COST_PER_REQUEST}."
+            )
+
         # 3. Save to database
         db_project = Project(
             goal=request.goal,
@@ -146,14 +162,102 @@ async def decompose(
         db.add(db_project)
         # Flush to DB (get_session will commit automatically)
         await db.flush()
-        
+
         return response
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Goal decomposition failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Decomposition failed: {str(e)}"
         )
+
+@app.post("/decompose/stream")
+async def decompose_stream(
+    request: DecomposeRequest,
+    engine: TaskForgeEngine = Depends(get_engine),
+    db: AsyncSession = Depends(get_session),
+    _auth = Depends(verify_api_key)
+):
+    # Check input length cap
+    if len(request.goal) > settings.MAX_INPUT_LENGTH:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Goal length exceeds the maximum allowed limit of {settings.MAX_INPUT_LENGTH} characters."
+        )
+
+    async def event_generator():
+        try:
+            # 1. Database-backed cache check
+            result = await db.execute(
+                select(Project).filter(Project.goal == request.goal).order_by(Project.created_at.desc())
+            )
+            existing_project = result.scalars().first()
+            if existing_project:
+                logger.info(f"Database cache hit for goal (stream): '{request.goal}'")
+                tree = TaskTree.model_validate(existing_project.task_tree_json)
+                usage = UsageStats(
+                    prompt_tokens=existing_project.prompt_tokens,
+                    completion_tokens=existing_project.completion_tokens,
+                    total_tokens=existing_project.total_tokens,
+                    estimated_cost_usd=existing_project.estimated_cost_usd
+                )
+                resp = DecomposeResponse(task_tree=tree, usage=usage, cached=True)
+                yield f"data: {json.dumps({'event': 'done', 'data': resp.model_dump()})}\n\n"
+                return
+
+            # 2. Run the decomposition engine with progress callbacks
+            queue = asyncio.Queue()
+
+            async def on_progress(event_data: dict):
+                await queue.put(event_data)
+
+            async def run_decomposition():
+                try:
+                    response = await engine.decompose_goal(request.goal, on_progress=on_progress)
+
+                    # Check cost limit
+                    if response.usage.estimated_cost_usd > settings.MAX_COST_PER_REQUEST:
+                        await queue.put({
+                            "event": "error",
+                            "message": f"Estimated request cost (${response.usage.estimated_cost_usd:.5f}) exceeds the limit of ${settings.MAX_COST_PER_REQUEST}."
+                        })
+                        return
+
+                    # Save to database
+                    db_project = Project(
+                        goal=request.goal,
+                        task_tree_json=response.task_tree.model_dump(),
+                        prompt_tokens=response.usage.prompt_tokens,
+                        completion_tokens=response.usage.completion_tokens,
+                        total_tokens=response.usage.total_tokens,
+                        estimated_cost_usd=response.usage.estimated_cost_usd
+                    )
+                    db.add(db_project)
+                    await db.flush()
+
+                    await queue.put({"event": "done", "data": response.model_dump()})
+                except Exception as ex:
+                    logger.exception("Decomposition stream failed in run_decomposition")
+                    await queue.put({"event": "error", "message": str(ex)})
+                finally:
+                    await queue.put(None)
+
+            # Spawn decomposition background task
+            task = asyncio.create_task(run_decomposition())
+
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield f"data: {json.dumps(item)}\n\n"
+
+        except Exception as e:
+            logger.exception("Error in event generator")
+            yield f"data: {json.dumps({'event': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.get("/projects")
 async def list_projects(
@@ -230,11 +334,16 @@ async def health(db: AsyncSession = Depends(get_session)):
     # Verify OpenRouter API (if key is set)
     if settings.OPENROUTER_API_KEY:
         try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
+            async with httpx.AsyncClient(timeout=5.0) as client:
                 headers = {"Authorization": f"Bearer {settings.OPENROUTER_API_KEY}"}
-                res = await client.get("https://openrouter.ai/api/v1/models", headers=headers)
+                res = await client.get("https://openrouter.ai/api/v1/auth/key", headers=headers)
                 if res.status_code == 200:
                     health_status["openrouter"] = "healthy"
+                    try:
+                        key_data = res.json().get("data", {})
+                        health_status["openrouter_data"] = key_data
+                    except Exception:
+                        pass
                 else:
                     health_status["openrouter"] = f"unhealthy (status {res.status_code})"
                     health_status["status"] = "unhealthy"

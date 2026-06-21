@@ -20,9 +20,9 @@ async def test_real_ollama_generate_categories():
     provider = OllamaProvider()
     # Pulling a simple goal
     prompt = "Decompose the goal: 'Create a personal website'"
-    
+
     categories_resp, usage = await provider.generate_json(prompt, CategoriesResponse)
-    
+
     assert isinstance(categories_resp, CategoriesResponse)
     assert len(categories_resp.categories) > 0
     assert usage.prompt_tokens >= 0

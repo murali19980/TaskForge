@@ -23,7 +23,7 @@ class Project(Base):
     estimated_cost_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, index=True, default=func.now())
 
-# Configure engine arguments. 
+# Configure engine arguments.
 # Connection pooling settings (pool_size, max_overflow) are ignored by SQLite but vital for PostgreSQL/MySQL
 engine_args = {}
 if not settings.DATABASE_URL.startswith("sqlite"):
@@ -35,8 +35,8 @@ if not settings.DATABASE_URL.startswith("sqlite"):
 
 engine = create_async_engine(settings.DATABASE_URL, echo=False, **engine_args)
 async_session_factory = async_sessionmaker(
-    bind=engine, 
-    expire_on_commit=False, 
+    bind=engine,
+    expire_on_commit=False,
     class_=AsyncSession
 )
 

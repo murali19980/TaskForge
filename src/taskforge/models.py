@@ -68,7 +68,7 @@ class TasksResponse(BaseModel):
 
 class DependencyMapResponse(BaseModel):
     dependencies: dict[str, list[str]] = Field(
-        ..., 
+        ...,
         description="A mapping from each task ID to a list of its dependency task IDs"
     )
 

@@ -25,7 +25,7 @@ Goal: "{goal}"
 Here is the current task tree (without dependencies):
 {tree}
 
-Analyze the tasks and identify which tasks depend on other tasks before they can start. 
+Analyze the tasks and identify which tasks depend on other tasks before they can start.
 For example, frontend components depend on database schema definition, or auth controller depends on DB setup.
 Ensure there are NO circular dependencies.
 
