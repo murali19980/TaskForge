@@ -74,3 +74,17 @@ def test_openrouter_model_validation():
     with pytest.raises(ValidationError) as exc_info:
         Settings(OPENROUTER_MODEL="google/gemini-2.5-flash", OPENROUTER_API_KEY="test")
     assert "Only free models are allowed" in str(exc_info.value)
+
+
+def test_pydantic_max_length_limits():
+    # 1. Test TaskTree categories limit (max_length=15)
+    categories = [Category(name=f"Cat {i}", tasks=[]) for i in range(16)]
+    with pytest.raises(ValidationError) as exc_info:
+        TaskTree(goal="Test goal", categories=categories)
+    assert "List should have at most 15 items" in str(exc_info.value)
+
+    # 2. Test Category tasks limit (max_length=25)
+    tasks = [Task(id=f"task_{i}", title=f"Task {i}", description=f"Desc {i}", estimated_hours=1.0) for i in range(26)]
+    with pytest.raises(ValidationError) as exc_info:
+        Category(name="Category A", tasks=tasks)
+    assert "List should have at most 25 items" in str(exc_info.value)

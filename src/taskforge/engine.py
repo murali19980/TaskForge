@@ -3,7 +3,7 @@ import re
 import logging
 import time
 import httpx
-from typing import Type
+from typing import Type, Optional
 from pydantic import BaseModel, ValidationError as PydanticValidationError
 from taskforge.exceptions import ValidationError, LLMOutputError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -88,7 +88,8 @@ class TaskForgeEngine:
         self,
         provider: BaseLLMProvider,
         prompt: str,
-        schema: Type[BaseModel]
+        schema: Type[BaseModel],
+        api_key: Optional[str] = None
     ) -> tuple[BaseModel, UsageStats]:
         # Select the correct semaphore based on provider type
         if isinstance(provider, OpenRouterProvider) or provider.__class__.__name__ == "OpenRouterProvider":
@@ -100,8 +101,12 @@ class TaskForgeEngine:
         try:
             logger.debug(f"Calling LLM provider {provider.__class__.__name__} ({getattr(provider, 'model', 'N/A')}) with prompt preview: {prompt[:100]}...")
             async with sem:
+                if isinstance(provider, OpenRouterProvider) or provider.__class__.__name__ == "OpenRouterProvider":
+                    coro = provider.generate_json(prompt, schema, client_api_key=api_key)
+                else:
+                    coro = provider.generate_json(prompt, schema)
                 result, usage = await asyncio.wait_for(
-                    provider.generate_json(prompt, schema),
+                    coro,
                     timeout=float(self.config.LLM_REQUEST_TIMEOUT)
                 )
             duration = time.perf_counter() - start_time
@@ -115,13 +120,14 @@ class TaskForgeEngine:
         self,
         provider: BaseLLMProvider,
         prompt: str,
-        schema: Type[BaseModel]
+        schema: Type[BaseModel],
+        api_key: Optional[str] = None
     ) -> tuple[BaseModel, UsageStats]:
         """Call LLM provider with per-provider semaphores, timeout, and model fallback chain."""
         is_openrouter = isinstance(provider, OpenRouterProvider) or provider.__class__.__name__ == "OpenRouterProvider"
 
         try:
-            return await self._execute_provider_call(provider, prompt, schema)
+            return await self._execute_provider_call(provider, prompt, schema, api_key=api_key)
         except Exception as e:
             if not is_openrouter:
                 logger.error(f"Provider {provider.__class__.__name__} failed: {e}")
@@ -135,7 +141,7 @@ class TaskForgeEngine:
                 )
                 try:
                     fallback_provider = OpenRouterProvider(api_key=getattr(provider, "api_key", None), model="openrouter/free")
-                    return await self._execute_provider_call(fallback_provider, prompt, schema)
+                    return await self._execute_provider_call(fallback_provider, prompt, schema, api_key=api_key)
                 except Exception as fallback_err:
                     logger.warning(
                         f"Fallback OpenRouter model 'openrouter/free' failed with error: {fallback_err}. "
@@ -161,7 +167,7 @@ class TaskForgeEngine:
             f"Error occurred. Retrying decompose_goal attempt {retry_state.attempt_number}..."
         )
     )
-    async def decompose_goal(self, goal: str, on_progress = None) -> DecomposeResponse:
+    async def decompose_goal(self, goal: str, api_key: Optional[str] = None, on_progress = None) -> DecomposeResponse:
         """
         Decomposes a high-level goal into a full TaskTree structure.
         Uses a map-reduce pattern with token tracking:
@@ -191,7 +197,7 @@ class TaskForgeEngine:
 
         architect_prompt = ARCHITECT_PROMPT.format(goal=prompt_goal)
         categories_resp, arch_usage = await self._call_llm_with_timeout(
-            self.architect_provider, architect_prompt, CategoriesResponse
+            self.architect_provider, architect_prompt, CategoriesResponse, api_key=api_key
         )
         categories_list = categories_resp.categories
         logger.info(f"Architect generated categories: {categories_list}")
@@ -212,7 +218,7 @@ class TaskForgeEngine:
             logger.info(f"Generating tasks for category: {category_name}")
             specialist_prompt = SPECIALIST_PROMPT.format(goal=prompt_goal, category=category_name)
             tasks_resp, spec_usage = await self._call_llm_with_timeout(
-                self.specialist_provider, specialist_prompt, TasksResponse
+                self.specialist_provider, specialist_prompt, TasksResponse, api_key=api_key
             )
             # Prefix task IDs with category slug to prevent duplicate collisions across categories
             cat_slug = re.sub(r'[^a-z0-9]+', '_', category_name.lower()).strip('_')
@@ -241,12 +247,12 @@ class TaskForgeEngine:
         if on_progress:
             await on_progress({"event": "refiner_start"})
 
-        temp_tree = TaskTree(goal=goal, categories=categories)
+        temp_tree = await asyncio.to_thread(TaskTree, goal=goal, categories=categories)
         tree_json = temp_tree.model_dump_json()
 
         refiner_prompt = REFINER_PROMPT.format(goal=prompt_goal, tree=tree_json)
         dep_resp, ref_usage = await self._call_llm_with_timeout(
-            self.refiner_provider, refiner_prompt, DependencyMapResponse
+            self.refiner_provider, refiner_prompt, DependencyMapResponse, api_key=api_key
         )
         dependency_map = dep_resp.dependencies
         logger.info(f"PM Refiner generated dependency map: {dependency_map}")
@@ -265,8 +271,8 @@ class TaskForgeEngine:
                 filtered_deps = [dep for dep in dep_ids if dep != task_id]
                 tasks_by_id[task_id].dependencies = filtered_deps
 
-        # Instantiate final tree which triggers validation
-        final_tree = TaskTree(goal=goal, categories=categories)
+        # Instantiate final tree which triggers validation in a worker thread (HIGH-2)
+        final_tree = await asyncio.to_thread(TaskTree, goal=goal, categories=categories)
 
         # Aggregate token usage statistics
         total_prompt = arch_usage.prompt_tokens + ref_usage.prompt_tokens + sum(u.prompt_tokens for u in specialist_usages)

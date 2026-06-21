@@ -1,6 +1,10 @@
 import { ref, computed } from 'vue'
 import type { TaskTree, HealthStatus, Project } from '../types'
 
+// Global state singleton for the API key and server config to persist in memory across instances (CRIT-1)
+const globalApiKey = ref('')
+const globalOpenrouterConfigured = ref(false)
+
 export function useTaskForge() {
   const isLoading = ref(false)
   const isReconnecting = ref(false)
@@ -65,10 +69,7 @@ export function useTaskForge() {
     }
 
     if (api_key !== undefined) {
-      // CRIT-1 (revised): sessionStorage is readable by any JS on the page.
-      // Only use for short-lived development keys. Never store production secrets here.
-      // Use the clearApiKey() method or close the tab to remove.
-      sessionStorage.setItem('taskforge_api_key', api_key)
+      globalApiKey.value = api_key
     }
 
     isLoading.value = true
@@ -78,18 +79,14 @@ export function useTaskForge() {
     await runDecomposeStream(sanitizedGoal)
   }
 
-  /** Remove the stored API key from sessionStorage immediately. */
+  /** Remove the stored API key from memory immediately. */
   function clearApiKey() {
-    sessionStorage.removeItem('taskforge_api_key')
+    globalApiKey.value = ''
   }
 
   async function runDecomposeStream(sanitizedGoal: string) {
-    const savedApiKey = sessionStorage.getItem('taskforge_api_key') || ''
     const headers: Record<string, string> = {
       'Content-Type': 'application/json'
-    }
-    if (savedApiKey) {
-      headers['Authorization'] = `Bearer ${savedApiKey}`
     }
 
     controller = new AbortController()
@@ -98,7 +95,10 @@ export function useTaskForge() {
       const response = await fetch(`${API_URL}/decompose/stream`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ goal: sanitizedGoal }),
+        body: JSON.stringify({
+          goal: sanitizedGoal,
+          api_key: globalApiKey.value || null
+        }),
         signal: controller.signal
       })
 
@@ -257,11 +257,7 @@ export function useTaskForge() {
   // Fetch past projects history
   async function fetchProjects() {
     projectsLoading.value = true
-    const savedApiKey = sessionStorage.getItem('taskforge_api_key') || ''
     const headers: Record<string, string> = {}
-    if (savedApiKey) {
-      headers['Authorization'] = `Bearer ${savedApiKey}`
-    }
 
     try {
       const response = await fetch(`${API_URL}/projects?limit=50`, { headers })
@@ -332,6 +328,19 @@ export function useTaskForge() {
     }
   }
 
+  // Fetch config flags from backend (CRIT-1, GET /config)
+  async function fetchConfig() {
+    try {
+      const response = await fetch(`${API_URL}/config`)
+      if (response.ok) {
+        const data = await response.json()
+        globalOpenrouterConfigured.value = !!data.openrouter_configured
+      }
+    } catch (err) {
+      console.error('Error fetching config flags:', err)
+    }
+  }
+
   // Cancel any active stream decomposition
   function abortDecomposition() {
     if (controller) {
@@ -364,9 +373,12 @@ export function useTaskForge() {
     health,
     projects,
     projectsLoading,
+    apiKey: globalApiKey,
+    openrouterConfigured: globalOpenrouterConfigured,
     decompose,
     fetchProjects,
     fetchHealth,
+    fetchConfig,
     reset,
     abortDecomposition,
     clearApiKey,

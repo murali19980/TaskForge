@@ -37,7 +37,20 @@ if not settings.DATABASE_URL.startswith("sqlite"):
         "pool_recycle": 3600
     })
 
+from sqlalchemy import event
+
 engine = create_async_engine(settings.DATABASE_URL, echo=False, **engine_args)
+
+# SQLite WAL mode + busy_timeout configuration (MED-1)
+if settings.DATABASE_URL.startswith("sqlite"):
+    @event.listens_for(engine.sync_engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.close()
+
 async_session_factory = async_sessionmaker(
     bind=engine,
     expire_on_commit=False,

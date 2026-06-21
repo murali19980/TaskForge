@@ -86,3 +86,28 @@ def test_llm_output_error_is_exception():
     err = LLMOutputError("Test error")
     assert isinstance(err, Exception)
     assert str(err) == "Test error"
+
+
+def test_openrouter_provider_key_precedence(monkeypatch):
+    from taskforge.config import settings
+    from taskforge.llm_provider import OpenRouterProvider
+    from taskforge.models import CategoriesResponse
+
+    # 1. Backend key set
+    monkeypatch.setattr(settings, "OPENROUTER_API_KEY", "backend_key")
+    provider = OpenRouterProvider(api_key="constructor_key")
+    assert provider._backend_key == "backend_key"
+    assert provider.api_key == "constructor_key"
+
+    # 2. No backend key, but constructor key set
+    monkeypatch.setattr(settings, "OPENROUTER_API_KEY", None)
+    provider2 = OpenRouterProvider(api_key="constructor_key")
+    assert provider2._backend_key is None
+    assert provider2.api_key == "constructor_key"
+
+    # 3. No keys set raises ValueError on generation
+    provider3 = OpenRouterProvider()
+    with pytest.raises(ValueError) as exc:
+        import asyncio
+        asyncio.run(provider3.generate_json("prompt", CategoriesResponse))
+    assert "OpenRouter API key is missing" in str(exc.value)

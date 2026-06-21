@@ -113,9 +113,10 @@ describe('useTaskForge Composable', () => {
       })
     ) as any
 
-    const { decompose } = useTaskForge()
+    const { decompose, apiKey } = useTaskForge()
 
     await decompose({ goal: 'test goal', api_key: 'supersecretkey123' })
-    expect(sessionStorage.getItem('taskforge_api_key')).toBe('supersecretkey123')
+    expect(apiKey.value).toBe('supersecretkey123')
+    expect(sessionStorage.getItem('taskforge_api_key')).toBeNull()
   })
 })

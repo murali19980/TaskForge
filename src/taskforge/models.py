@@ -10,11 +10,11 @@ class Task(BaseModel):
 
 class Category(BaseModel):
     name: str = Field(..., description="Name of the category, e.g. 'Backend Development'")
-    tasks: list[Task] = Field(default_factory=list, description="List of tasks in this category")
+    tasks: list[Task] = Field(default_factory=list, max_length=25, description="List of tasks in this category")
 
 class TaskTree(BaseModel):
     goal: str = Field(..., description="The high-level goal being decomposed")
-    categories: list[Category] = Field(default_factory=list, description="Grouped categories of tasks")
+    categories: list[Category] = Field(default_factory=list, max_length=15, description="Grouped categories of tasks")
 
     @model_validator(mode="after")
     def validate_tree(self) -> "TaskTree":

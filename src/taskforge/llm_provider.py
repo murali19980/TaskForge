@@ -148,7 +148,8 @@ class OllamaProvider:
 
 class OpenRouterProvider:
     def __init__(self, api_key: str = None, model: str = None):
-        self.api_key = api_key or settings.OPENROUTER_API_KEY
+        self._backend_key = settings.OPENROUTER_API_KEY
+        self.api_key = api_key or self._backend_key
         self.model = model
         if model:
             self.model_list = [model]
@@ -157,13 +158,19 @@ class OpenRouterProvider:
             self.model = self.model_list[0] if self.model_list else settings.OPENROUTER_MODEL
         logger.info(f"OpenRouterProvider initialized with models={self.model_list}")
 
-    async def generate_json(self, prompt: str, expected_schema: Type[BaseModel]) -> tuple[BaseModel, UsageStats]:
-        if not self.api_key:
+    async def generate_json(self, prompt: str, expected_schema: Type[BaseModel], client_api_key: str | None = None) -> tuple[BaseModel, UsageStats]:
+        effective_key = self._backend_key or client_api_key or self.api_key
+        if not effective_key:
             raise ValueError("OpenRouter API key is missing. Set OPENROUTER_API_KEY in your config/.env file.")
+
+        if self._backend_key:
+            logger.info("Using backend OpenRouter API key (from .env)")
+        else:
+            logger.info("Using frontend-provided OpenRouter API key")
 
         url = "https://openrouter.ai/api/v1/chat/completions"
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {effective_key}",
             "Content-Type": "application/json",
             "HTTP-Referer": "http://localhost:8000",
             "X-Title": "TaskForge"
@@ -181,20 +188,24 @@ class OpenRouterProvider:
         last_exception = None
         for model in self.model_list:
             logger.info(f"OpenRouter attempting generation using model '{model}'...")
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt}
-                ],
-                "response_format": {"type": "json_object"},
-                "temperature": 0.1
-            }
-
+            
             max_attempts = 3
+            current_max_tokens = None
             try:
                 async with httpx.AsyncClient(timeout=float(settings.LLM_REQUEST_TIMEOUT)) as client:
                     for attempt in range(1, max_attempts + 1):
+                        payload = {
+                            "model": model,
+                            "messages": [
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": prompt}
+                            ],
+                            "response_format": {"type": "json_object"},
+                            "temperature": 0.1
+                        }
+                        if current_max_tokens:
+                            payload["max_tokens"] = current_max_tokens
+
                         try:
                             response = await client.post(url, json=payload, headers=headers)
                             response.raise_for_status()
@@ -278,8 +289,15 @@ class OpenRouterProvider:
                             logger.error(f"HTTP error contacting OpenRouter: {str(e)}")
                             raise
                         except json.JSONDecodeError as e:
-                            logger.error(f"OpenRouter returned invalid JSON. Error: {str(e)}")
-                            raise LLMOutputError(f"OpenRouter returned invalid JSON: {str(e)}")
+                            logger.error(f"Failed to decode OpenRouter response as JSON. Raw text: {response_text}. Error: {str(e)}")
+                            if attempt < max_attempts:
+                                if current_max_tokens is None:
+                                    current_max_tokens = 1000
+                                current_max_tokens = min(int(current_max_tokens * 1.5), 4096)
+                                logger.warning(f"Retrying OpenRouter request with max_tokens={current_max_tokens} due to JSONDecodeError (attempt {attempt}/{max_attempts})")
+                                continue
+                            else:
+                                raise LLMOutputError(f"OpenRouter returned invalid JSON: {str(e)}")
                         except Exception as e:
                             logger.error(f"Validation or unexpected error in OpenRouter call: {str(e)}")
                             raise

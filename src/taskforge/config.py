@@ -37,6 +37,10 @@ class Settings(BaseSettings):
             return [m.strip() for m in self.OPENROUTER_MODELS.split(",") if m.strip()]
         return [self.OPENROUTER_MODEL] if self.OPENROUTER_MODEL else []
 
+    @property
+    def is_openrouter_key_configured(self) -> bool:
+        return bool(self.OPENROUTER_API_KEY)
+
     @field_validator("OPENROUTER_MODEL")
     @classmethod
     def validate_openrouter_model(cls, v: str) -> str:

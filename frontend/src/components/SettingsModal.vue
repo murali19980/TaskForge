@@ -21,35 +21,42 @@
       </div>
 
       <div class="flex-1 p-5 space-y-6 overflow-y-auto">
-        <!-- API Authorization settings section -->
+        <!-- OpenRouter API key configuration section -->
         <div class="space-y-4">
           <div>
-            <h3 class="text-sm font-semibold text-surface-200 mb-1">API Authentication Key</h3>
-            <p class="text-xs text-surface-500 font-light leading-relaxed">Configure the Bearer API Key required to authenticate request payloads sent to TaskForge FastAPI endpoints.</p>
-            <p class="text-[11px] text-amber-500/90 font-medium leading-relaxed mt-2 bg-amber-500/5 border border-amber-500/10 rounded-lg p-2 flex items-start gap-1.5">
+            <h3 class="text-sm font-semibold text-surface-200 mb-1">OpenRouter API Key</h3>
+            <p class="text-xs text-surface-500 font-light leading-relaxed">Configure the OpenRouter API Key required to authenticate request payloads sent to external LLMs.</p>
+            <p v-if="openrouterConfigured" class="text-[11px] text-emerald-500/90 font-medium leading-relaxed mt-2 bg-emerald-500/5 border border-emerald-500/10 rounded-lg p-2 flex items-start gap-1.5">
+              <svg class="w-3.5 h-3.5 mt-0.5 shrink-0 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+              </svg>
+              <span>🔐 OpenRouter API key is managed on the server. No input needed.</span>
+            </p>
+            <p v-else class="text-[11px] text-amber-500/90 font-medium leading-relaxed mt-2 bg-amber-500/5 border border-amber-500/10 rounded-lg p-2 flex items-start gap-1.5">
               <svg class="w-3.5 h-3.5 mt-0.5 shrink-0 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
               </svg>
-              <span>API key stored in session memory – cleared when tab closes. Do not use production secrets.</span>
+              <span>API key stored in memory – cleared when tab closes. Do not use production secrets.</span>
             </p>
           </div>
 
           <div class="space-y-2">
-            <label for="apikey" class="block text-xs font-semibold text-surface-400 uppercase tracking-wider">Bearer Token</label>
+            <label for="apikey" class="block text-xs font-semibold text-surface-400 uppercase tracking-wider">OpenRouter API Key</label>
             <input
               id="apikey"
-              v-model="apiKey"
+              v-model="localApiKey"
+              :disabled="openrouterConfigured"
               type="password"
-              class="w-full px-4 py-2.5 bg-surface-950/50 border border-surface-700/50 rounded-xl text-sm text-surface-100 placeholder-surface-700 focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500 transition-all font-mono"
-              placeholder="e.g. your_secret_api_key_here..."
+              class="w-full px-4 py-2.5 bg-surface-950/50 border border-surface-700/50 rounded-xl text-sm text-surface-100 placeholder-surface-700 focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500 transition-all font-mono disabled:opacity-50 disabled:cursor-not-allowed"
+              placeholder="e.g. sk-or-v1-..."
             />
             <div class="flex items-center justify-between text-[10px] text-surface-500 font-light">
-              <span>Status: <strong :class="isKeySet ? 'text-emerald-500 font-semibold' : 'text-amber-500 font-semibold'">{{ isKeySet ? 'Key configured' : 'No key (local mode)' }}</strong></span>
-              <span v-if="sessionStorageSet" class="text-primary-400">Stored in session</span>
+              <span v-if="openrouterConfigured">Status: <strong class="text-emerald-500 font-semibold">Server-managed</strong></span>
+              <span v-else>Status: <strong :class="isKeySet ? 'text-emerald-500 font-semibold' : 'text-amber-500 font-semibold'">{{ isKeySet ? 'Key configured' : 'No key (local mode)' }}</strong></span>
             </div>
           </div>
 
-          <div class="flex flex-wrap gap-2.5 pt-2">
+          <div class="flex flex-wrap gap-2.5 pt-2" v-if="!openrouterConfigured">
             <button
               @click="saveKey"
               type="button"
@@ -106,6 +113,7 @@
 
 <script setup lang="ts">
 import { ref, watch, computed, onMounted } from 'vue'
+import { useTaskForge } from '../composables/useTaskForge'
 
 const props = defineProps<{
   show: boolean
@@ -116,21 +124,27 @@ const emit = defineEmits<{
   'api-key-changed': []
 }>()
 
-const apiKey = ref('')
-const sessionStorageSet = ref(false)
+const { apiKey: globalApiKey, openrouterConfigured, fetchConfig, clearApiKey } = useTaskForge()
+
+const localApiKey = ref('')
 const testLoading = ref(false)
 const connectionStatus = ref<'idle' | 'success' | 'unauthorized' | 'error' | null>(null)
 const errorDetail = ref('')
 
-const isKeySet = computed(() => apiKey.value.trim().length > 0)
+const isKeySet = computed(() => {
+  if (openrouterConfigured.value) return true
+  return localApiKey.value.trim().length > 0
+})
 
-onMounted(() => {
+onMounted(async () => {
+  await fetchConfig()
   loadKey()
 })
 
 // Keep local state in sync when modal opens
-watch(() => props.show, (newVal) => {
+watch(() => props.show, async (newVal) => {
   if (newVal) {
+    await fetchConfig()
     loadKey()
     connectionStatus.value = null
     errorDetail.value = ''
@@ -138,27 +152,19 @@ watch(() => props.show, (newVal) => {
 })
 
 function loadKey() {
-  const key = sessionStorage.getItem('taskforge_api_key') || ''
-  apiKey.value = key
-  sessionStorageSet.value = key.trim().length > 0
+  localApiKey.value = globalApiKey.value
 }
 
 function saveKey() {
-  const trimmed = apiKey.value.trim()
-  if (trimmed) {
-    sessionStorage.setItem('taskforge_api_key', trimmed)
-    sessionStorageSet.value = true
-  } else {
-    clearKey()
-  }
+  const trimmed = localApiKey.value.trim()
+  globalApiKey.value = trimmed
   emit('api-key-changed')
   connectionStatus.value = null
 }
 
 function clearKey() {
-  sessionStorage.removeItem('taskforge_api_key')
-  apiKey.value = ''
-  sessionStorageSet.value = false
+  clearApiKey()
+  localApiKey.value = ''
   emit('api-key-changed')
   connectionStatus.value = null
 }
@@ -169,7 +175,7 @@ async function testConnection() {
   errorDetail.value = ''
 
   const headers: Record<string, string> = {}
-  const key = apiKey.value.trim()
+  const key = localApiKey.value.trim()
   if (key) {
     headers['Authorization'] = `Bearer ${key}`
   }

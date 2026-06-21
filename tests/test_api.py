@@ -247,3 +247,21 @@ async def test_decompose_endpoint_unexpected_exception_generic_message(monkeypat
     finally:
         app.dependency_overrides[get_engine] = override_get_engine
 
+
+@pytest.mark.asyncio
+async def test_get_config_endpoint(monkeypatch):
+    from taskforge.config import settings
+    # 1. Test when OPENROUTER_API_KEY is unset
+    monkeypatch.setattr(settings, "OPENROUTER_API_KEY", None)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        response = await ac.get("/config")
+        assert response.status_code == 200
+        assert response.json() == {"openrouter_configured": False}
+
+    # 2. Test when OPENROUTER_API_KEY is set
+    monkeypatch.setattr(settings, "OPENROUTER_API_KEY", "some_key_here")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        response = await ac.get("/config")
+        assert response.status_code == 200
+        assert response.json() == {"openrouter_configured": True}
+

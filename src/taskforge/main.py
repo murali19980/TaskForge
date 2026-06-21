@@ -54,6 +54,7 @@ def _create_engine() -> TaskForgeEngine:
 
 class DecomposeRequest(BaseModel):
     goal: str = Field(..., min_length=1, max_length=2000, description="The high-level goal to decompose")
+    api_key: Optional[str] = Field(default=None, description="Optional OpenRouter API key supplied by client")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -205,7 +206,7 @@ async def decompose(
             return DecomposeResponse(task_tree=tree, usage=usage, cached=True)
 
         # 2. Run the decomposition engine
-        response = await engine.decompose_goal(payload.goal)
+        response = await engine.decompose_goal(payload.goal, api_key=payload.api_key)
 
         # Check cost limit
         if response.usage.estimated_cost_usd > settings.MAX_COST_PER_REQUEST:
@@ -288,7 +289,7 @@ async def decompose_stream(
 
             async def run_decomposition():
                 try:
-                    response = await engine.decompose_goal(payload.goal, on_progress=on_progress)
+                    response = await engine.decompose_goal(payload.goal, api_key=payload.api_key, on_progress=on_progress)
 
                     # Check cost limit
                     if response.usage.estimated_cost_usd > settings.MAX_COST_PER_REQUEST:
@@ -384,6 +385,13 @@ async def list_projects(
             detail="Failed to retrieve projects. Check server logs."
         )
 
+@app.get("/config")
+async def get_config():
+    """Return public configuration flags such as whether OpenRouter key is set."""
+    return {
+        "openrouter_configured": settings.is_openrouter_key_configured
+    }
+
 @app.get("/health")
 @limiter.limit("10/minute")
 async def health(request: Request, db: AsyncSession = Depends(get_session), _auth = Depends(verify_api_key)):
@@ -457,7 +465,7 @@ async def serve_index():
 @app.get("/{full_path:path}")
 async def catch_all(full_path: str):
     # Exclude API endpoints from routing to catch-all
-    if full_path.startswith(("decompose", "projects", "health", "docs", "openapi.json")):
+    if full_path.startswith(("decompose", "projects", "health", "config", "docs", "openapi.json")):
         raise HTTPException(status_code=404)
     index_path = os.path.join(static_dir, "index.html")
     if os.path.exists(index_path):
