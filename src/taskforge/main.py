@@ -1,7 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 from typing import Optional
-from fastapi import FastAPI, Depends, HTTPException, status, Security
+from fastapi import FastAPI, Depends, HTTPException, status, Security, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,6 +14,10 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 import httpx
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import _rate_limit_exceeded_handler
 
 from taskforge.config import settings
 from taskforge.database import init_db, get_session, Project
@@ -60,15 +64,25 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Rate Limiter setup
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # CORS configurations loaded from environment
 origins = [o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if origins:
+    allow_creds = True
+    if "*" in origins:
+        logger.critical("CRITICAL SECURITY WARNING: Wildcard origin '*' allowed alongside allow_credentials=True. Setting allow_credentials to False to prevent security vulnerabilities.")
+        allow_creds = False
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=allow_creds,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 # API Bearer Security
 security = HTTPBearer(auto_error=False)
@@ -120,15 +134,17 @@ def get_engine() -> TaskForgeEngine:
     )
 
 @app.post("/decompose", response_model=DecomposeResponse)
+@limiter.limit(f"{settings.RATE_LIMIT_PER_MINUTE}/minute")
 async def decompose(
-    request: DecomposeRequest,
+    request: Request,
+    payload: DecomposeRequest,
     engine: TaskForgeEngine = Depends(get_engine),
     db: AsyncSession = Depends(get_session),
     _auth = Depends(verify_api_key)
 ):
     try:
         # Check input length cap
-        if len(request.goal) > settings.MAX_INPUT_LENGTH:
+        if len(payload.goal) > settings.MAX_INPUT_LENGTH:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Goal length exceeds the maximum allowed limit of {settings.MAX_INPUT_LENGTH} characters."
@@ -136,11 +152,11 @@ async def decompose(
 
         # 1. Database-backed cache check
         result = await db.execute(
-            select(Project).filter(Project.goal == request.goal).order_by(Project.created_at.desc())
+            select(Project).filter(Project.goal == payload.goal).order_by(Project.created_at.desc())
         )
         existing_project = result.scalars().first()
         if existing_project:
-            logger.info(f"Database cache hit for goal: '{request.goal}'")
+            logger.info(f"Database cache hit for goal: '{payload.goal}'")
             tree = TaskTree.model_validate(existing_project.task_tree_json)
             usage = UsageStats(
                 prompt_tokens=existing_project.prompt_tokens,
@@ -151,7 +167,7 @@ async def decompose(
             return DecomposeResponse(task_tree=tree, usage=usage, cached=True)
 
         # 2. Run the decomposition engine
-        response = await engine.decompose_goal(request.goal)
+        response = await engine.decompose_goal(payload.goal)
 
         # Check cost limit
         if response.usage.estimated_cost_usd > settings.MAX_COST_PER_REQUEST:
@@ -162,7 +178,7 @@ async def decompose(
 
         # 3. Save to database
         db_project = Project(
-            goal=request.goal,
+            goal=payload.goal,
             task_tree_json=response.task_tree.model_dump(),
             prompt_tokens=response.usage.prompt_tokens,
             completion_tokens=response.usage.completion_tokens,
@@ -184,14 +200,16 @@ async def decompose(
         )
 
 @app.post("/decompose/stream")
+@limiter.limit(f"{settings.RATE_LIMIT_PER_MINUTE}/minute")
 async def decompose_stream(
-    request: DecomposeRequest,
+    request: Request,
+    payload: DecomposeRequest,
     engine: TaskForgeEngine = Depends(get_engine),
     db: AsyncSession = Depends(get_session),
     _auth = Depends(verify_api_key)
 ):
     # Check input length cap
-    if len(request.goal) > settings.MAX_INPUT_LENGTH:
+    if len(payload.goal) > settings.MAX_INPUT_LENGTH:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Goal length exceeds the maximum allowed limit of {settings.MAX_INPUT_LENGTH} characters."
@@ -201,11 +219,11 @@ async def decompose_stream(
         try:
             # 1. Database-backed cache check
             result = await db.execute(
-                select(Project).filter(Project.goal == request.goal).order_by(Project.created_at.desc())
+                select(Project).filter(Project.goal == payload.goal).order_by(Project.created_at.desc())
             )
             existing_project = result.scalars().first()
             if existing_project:
-                logger.info(f"Database cache hit for goal (stream): '{request.goal}'")
+                logger.info(f"Database cache hit for goal (stream): '{payload.goal}'")
                 tree = TaskTree.model_validate(existing_project.task_tree_json)
                 usage = UsageStats(
                     prompt_tokens=existing_project.prompt_tokens,
@@ -225,7 +243,7 @@ async def decompose_stream(
 
             async def run_decomposition():
                 try:
-                    response = await engine.decompose_goal(request.goal, on_progress=on_progress)
+                    response = await engine.decompose_goal(payload.goal, on_progress=on_progress)
 
                     # Check cost limit
                     if response.usage.estimated_cost_usd > settings.MAX_COST_PER_REQUEST:
@@ -237,7 +255,7 @@ async def decompose_stream(
 
                     # Save to database
                     db_project = Project(
-                        goal=request.goal,
+                        goal=payload.goal,
                         task_tree_json=response.task_tree.model_dump(),
                         prompt_tokens=response.usage.prompt_tokens,
                         completion_tokens=response.usage.completion_tokens,

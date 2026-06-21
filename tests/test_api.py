@@ -41,6 +41,10 @@ async def override_get_session():
 from taskforge.config import settings
 settings.API_KEY = None
 
+# Bypass rate limiting for standard API tests to prevent test interference
+from taskforge.main import limiter
+limiter.enabled = False
+
 def override_get_engine():
     # Use MockLLMProvider for API tests to avoid calling real Ollama endpoint
     mock_provider = MockLLMProvider()
@@ -202,3 +206,23 @@ async def test_decompose_stream_endpoint():
                     lines.append(line)
             assert len(lines) > 0
             assert lines[0].startswith("data: ")
+
+@pytest.mark.asyncio
+async def test_decompose_endpoint_rate_limiting():
+    from taskforge.main import limiter
+    limiter.enabled = True
+    limiter.reset()
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            for _ in range(5):
+                res = await ac.post("/decompose", json={"goal": "Test Rate Limit"})
+                assert res.status_code == 200
+            res_limit = await ac.post("/decompose", json={"goal": "Test Rate Limit"})
+            assert res_limit.status_code == 429
+            # Check either 'detail' or 'error' key depending on slowapi version
+            res_data = res_limit.json()
+            err_msg = res_data.get("detail") or res_data.get("error") or ""
+            assert "limit exceeded" in err_msg.lower()
+    finally:
+        limiter.reset()
+        limiter.enabled = False

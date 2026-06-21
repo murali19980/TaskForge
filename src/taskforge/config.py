@@ -14,12 +14,13 @@ class Settings(BaseSettings):
     OPENROUTER_MODELS: str = ""
     OPENROUTER_MAX_CONCURRENT: int = 10
     DATABASE_URL: str = "sqlite+aiosqlite:///./taskforge.db"
-    CORS_ORIGINS: str = "http://localhost:8501"
+    CORS_ORIGINS: str = ""
     API_KEY: str | None = None
     LOG_LEVEL: str = "INFO"
     MAX_INPUT_LENGTH: int = 2000
     MAX_COST_PER_REQUEST: float = 0.01
     LLM_REQUEST_TIMEOUT: int = 120
+    RATE_LIMIT_PER_MINUTE: int = 5
 
     @property
     def openrouter_model_list(self) -> list[str]:

@@ -136,11 +136,15 @@ class TaskForgeEngine:
 
         logger.info(f"Decomposing goal: '{goal}'")
 
+        # Prepare safe version of goal for prompt inclusion (escaping braces and adding delimiters)
+        escaped_goal = goal.replace("{", "{{").replace("}", "}}")
+        prompt_goal = f"<USER_GOAL>\n{escaped_goal}\n</USER_GOAL>"
+
         # Step 1: Map (Architect)
         if on_progress:
             await on_progress({"event": "architect_start"})
 
-        architect_prompt = ARCHITECT_PROMPT.format(goal=goal)
+        architect_prompt = ARCHITECT_PROMPT.format(goal=prompt_goal)
         categories_resp, arch_usage = await self._call_llm_with_timeout(
             self.architect_provider, architect_prompt, CategoriesResponse
         )
@@ -161,7 +165,7 @@ class TaskForgeEngine:
             if on_progress:
                 await on_progress({"event": "specialist_start", "category": category_name})
             logger.info(f"Generating tasks for category: {category_name}")
-            specialist_prompt = SPECIALIST_PROMPT.format(goal=goal, category=category_name)
+            specialist_prompt = SPECIALIST_PROMPT.format(goal=prompt_goal, category=category_name)
             tasks_resp, spec_usage = await self._call_llm_with_timeout(
                 self.specialist_provider, specialist_prompt, TasksResponse
             )
@@ -195,7 +199,7 @@ class TaskForgeEngine:
         temp_tree = TaskTree(goal=goal, categories=categories)
         tree_dict = temp_tree.model_dump()
 
-        refiner_prompt = REFINER_PROMPT.format(goal=goal, tree=str(tree_dict))
+        refiner_prompt = REFINER_PROMPT.format(goal=prompt_goal, tree=str(tree_dict))
         dep_resp, ref_usage = await self._call_llm_with_timeout(
             self.refiner_provider, refiner_prompt, DependencyMapResponse
         )
