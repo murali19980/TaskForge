@@ -1,4 +1,5 @@
 import asyncio
+import re
 import logging
 import time
 import httpx
@@ -12,7 +13,9 @@ from taskforge.models import (
     Category, 
     CategoriesResponse, 
     TasksResponse, 
-    DependencyMapResponse
+    DependencyMapResponse,
+    UsageStats,
+    DecomposeResponse
 )
 from taskforge.prompts import ARCHITECT_PROMPT, SPECIALIST_PROMPT, REFINER_PROMPT
 from taskforge.llm_provider import BaseLLMProvider
@@ -20,27 +23,42 @@ from taskforge.llm_provider import BaseLLMProvider
 logger = logging.getLogger("taskforge.engine")
 
 class TaskForgeEngine:
-    def __init__(self, llm: BaseLLMProvider, config=settings):
-        self.llm = llm
+    def __init__(
+        self, 
+        architect_provider: BaseLLMProvider, 
+        specialist_provider: BaseLLMProvider, 
+        refiner_provider: BaseLLMProvider, 
+        config=settings
+    ):
+        self.architect_provider = architect_provider
+        self.specialist_provider = specialist_provider
+        self.refiner_provider = refiner_provider
         self.config = config
-        logger.info("TaskForgeEngine initialized")
+        # Global semaphore restricting all concurrent LLM calls to 2 (prevents queue congestion on local models)
+        self.llm_semaphore = asyncio.Semaphore(2)
+        logger.info("TaskForgeEngine initialized with hybrid providers")
 
-    async def _call_llm_with_timeout(self, prompt: str, schema: Type[BaseModel]) -> BaseModel:
-        """Call LLM provider wrapping it with a 30-second timeout."""
+    async def _call_llm_with_timeout(
+        self, 
+        provider: BaseLLMProvider, 
+        prompt: str, 
+        schema: Type[BaseModel]
+    ) -> tuple[BaseModel, UsageStats]:
+        """Call LLM provider wrapping it with the global semaphore and a 120-second timeout."""
         start_time = time.perf_counter()
         try:
-            logger.debug(f"Calling LLM with prompt preview: {prompt[:100]}...")
-            # Enforce 30 seconds timeout
-            result = await asyncio.wait_for(
-                self.llm.generate_json(prompt, schema), 
-                timeout=30.0
-            )
+            logger.debug(f"Calling LLM provider {provider.__class__.__name__} with prompt preview: {prompt[:100]}...")
+            async with self.llm_semaphore:
+                result, usage = await asyncio.wait_for(
+                    provider.generate_json(prompt, schema), 
+                    timeout=120.0
+                )
             duration = time.perf_counter() - start_time
             logger.info(f"LLM call to {schema.__name__} completed in {duration:.2f}s")
-            return result
+            return result, usage
         except asyncio.TimeoutError:
-            logger.error(f"LLM call timed out after 30 seconds")
-            raise TimeoutError("LLM generation timed out after 30 seconds")
+            logger.error(f"LLM call timed out after 120 seconds")
+            raise TimeoutError("LLM generation timed out after 120 seconds")
         except Exception as e:
             logger.error(f"LLM call failed with error: {str(e)}")
             raise
@@ -54,23 +72,27 @@ class TaskForgeEngine:
             f"Error occurred. Retrying decompose_goal attempt {retry_state.attempt_number}..."
         )
     )
-    async def decompose_goal(self, goal: str) -> TaskTree:
+    async def decompose_goal(self, goal: str) -> DecomposeResponse:
         """
         Decomposes a high-level goal into a full TaskTree structure.
-        Uses a map-reduce pattern:
+        Uses a map-reduce pattern with token tracking:
           1. Map (Architect): Generate categories.
           2. Reduce (Specialists): Concurrently generate tasks per category.
           3. Refine (PM): Calculate dependencies and validate.
         """
         if not goal or not goal.strip():
             raise ValueError("Goal cannot be empty")
+            
+        if len(goal) > 1000:
+            logger.warning(f"Goal length {len(goal)} exceeds 1000 limit, truncating...")
+            goal = goal[:1000]
 
         logger.info(f"Decomposing goal: '{goal}'")
         
         # Step 1: Map (Architect)
         architect_prompt = ARCHITECT_PROMPT.format(goal=goal)
-        categories_resp: CategoriesResponse = await self._call_llm_with_timeout(
-            architect_prompt, CategoriesResponse
+        categories_resp, arch_usage = await self._call_llm_with_timeout(
+            self.architect_provider, architect_prompt, CategoriesResponse
         )
         categories_list = categories_resp.categories
         logger.info(f"Architect generated categories: {categories_list}")
@@ -78,36 +100,41 @@ class TaskForgeEngine:
         if not categories_list:
             raise ValueError("LLM generated empty category list")
 
-        # Step 2: Reduce (Specialists) with Semaphore limit of 5
-        semaphore = asyncio.Semaphore(5)
-
-        async def generate_tasks_for_category(category_name: str) -> Category:
-            async with semaphore:
-                logger.info(f"Generating tasks for category: {category_name}")
-                specialist_prompt = SPECIALIST_PROMPT.format(goal=goal, category=category_name)
-                tasks_resp: TasksResponse = await self._call_llm_with_timeout(
-                    specialist_prompt, TasksResponse
-                )
-                return Category(name=category_name, tasks=tasks_resp.tasks)
+        # Step 2: Reduce (Specialists)
+        async def generate_tasks_for_category(category_name: str) -> tuple[Category, UsageStats]:
+            logger.info(f"Generating tasks for category: {category_name}")
+            specialist_prompt = SPECIALIST_PROMPT.format(goal=goal, category=category_name)
+            tasks_resp, spec_usage = await self._call_llm_with_timeout(
+                self.specialist_provider, specialist_prompt, TasksResponse
+            )
+            # Prefix task IDs with category slug to prevent duplicate collisions across categories
+            cat_slug = re.sub(r'[^a-z0-9]+', '_', category_name.lower()).strip('_')
+            prefixed_tasks = []
+            for task in tasks_resp.tasks:
+                if not task.id.startswith(cat_slug):
+                    task.id = f"{cat_slug}_{task.id}"
+                prefixed_tasks.append(task)
+            return Category(name=category_name, tasks=prefixed_tasks), spec_usage
 
         # Launch category task generators concurrently
         tasks_futures = [generate_tasks_for_category(cat) for cat in categories_list]
-        categories: list[Category] = await asyncio.gather(*tasks_futures)
+        specialist_results = await asyncio.gather(*tasks_futures)
+        
+        categories = [r[0] for r in specialist_results]
+        specialist_usages = [r[1] for r in specialist_results]
         
         # Step 3: Refine (PM dependencies)
-        # Construct temporary tree to serialize for PM analysis
         temp_tree = TaskTree(goal=goal, categories=categories)
         tree_dict = temp_tree.model_dump()
         
         refiner_prompt = REFINER_PROMPT.format(goal=goal, tree=str(tree_dict))
-        dep_resp: DependencyMapResponse = await self._call_llm_with_timeout(
-            refiner_prompt, DependencyMapResponse
+        dep_resp, ref_usage = await self._call_llm_with_timeout(
+            self.refiner_provider, refiner_prompt, DependencyMapResponse
         )
         dependency_map = dep_resp.dependencies
         logger.info(f"PM Refiner generated dependency map: {dependency_map}")
 
-        # Apply dependencies to the categories/tasks structure
-        # Build map of tasks by ID for easy lookup and modification
+        # Apply dependencies
         tasks_by_id = {}
         for category in categories:
             for task in category.tasks:
@@ -115,11 +142,24 @@ class TaskForgeEngine:
 
         for task_id, dep_ids in dependency_map.items():
             if task_id in tasks_by_id:
-                # Filter out any self-dependencies to avoid trivial cycles
                 filtered_deps = [dep for dep in dep_ids if dep != task_id]
                 tasks_by_id[task_id].dependencies = filtered_deps
 
-        # Instantiate final tree which triggers validation (cycles, duplicate IDs, missing refs)
+        # Instantiate final tree which triggers validation
         final_tree = TaskTree(goal=goal, categories=categories)
-        logger.info("Goal successfully decomposed and validated")
-        return final_tree
+        
+        # Aggregate token usage statistics
+        total_prompt = arch_usage.prompt_tokens + ref_usage.prompt_tokens + sum(u.prompt_tokens for u in specialist_usages)
+        total_completion = arch_usage.completion_tokens + ref_usage.completion_tokens + sum(u.completion_tokens for u in specialist_usages)
+        total_tokens = arch_usage.total_tokens + ref_usage.total_tokens + sum(u.total_tokens for u in specialist_usages)
+        total_cost = arch_usage.estimated_cost_usd + ref_usage.estimated_cost_usd + sum(u.estimated_cost_usd for u in specialist_usages)
+        
+        usage = UsageStats(
+            prompt_tokens=total_prompt,
+            completion_tokens=total_completion,
+            total_tokens=total_tokens,
+            estimated_cost_usd=total_cost
+        )
+        
+        logger.info(f"Goal successfully decomposed. Total tokens used: {total_tokens}, cost: ${total_cost:.5f}")
+        return DecomposeResponse(task_tree=final_tree, usage=usage, cached=False)

@@ -71,3 +71,14 @@ class DependencyMapResponse(BaseModel):
         ..., 
         description="A mapping from each task ID to a list of its dependency task IDs"
     )
+
+class UsageStats(BaseModel):
+    prompt_tokens: int = Field(default=0, description="Tokens used in the request prompt")
+    completion_tokens: int = Field(default=0, description="Tokens generated in the completion")
+    total_tokens: int = Field(default=0, description="Total tokens used")
+    estimated_cost_usd: float = Field(default=0.0, description="Estimated OpenRouter cost in USD")
+
+class DecomposeResponse(BaseModel):
+    task_tree: TaskTree = Field(..., description="Decomposed task tree structure")
+    usage: UsageStats = Field(default_factory=UsageStats, description="Tokens usage stats")
+    cached: bool = Field(default=False, description="Whether the result was retrieved from persistent cache")

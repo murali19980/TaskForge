@@ -8,15 +8,16 @@ from taskforge.models import (
     CategoriesResponse, 
     TasksResponse, 
     DependencyMapResponse,
-    Task
+    Task,
+    UsageStats
 )
 from taskforge.config import settings
 
 logger = logging.getLogger("taskforge.llm_provider")
 
 class BaseLLMProvider(Protocol):
-    async def generate_json(self, prompt: str, expected_schema: Type[BaseModel]) -> BaseModel:
-        """Sends prompt to LLM and returns validated Pydantic model response."""
+    async def generate_json(self, prompt: str, expected_schema: Type[BaseModel]) -> tuple[BaseModel, UsageStats]:
+        """Sends prompt to LLM and returns validated Pydantic model response with UsageStats."""
         ...
 
 class OllamaProvider:
@@ -25,7 +26,7 @@ class OllamaProvider:
         self.model = model or settings.OLLAMA_MODEL
         logger.info(f"OllamaProvider initialized with host={self.host}, model={self.model}")
 
-    async def generate_json(self, prompt: str, expected_schema: Type[BaseModel]) -> BaseModel:
+    async def generate_json(self, prompt: str, expected_schema: Type[BaseModel]) -> tuple[BaseModel, UsageStats]:
         url = f"{self.host.rstrip('/')}/api/generate"
         
         # We pass the schema directly to Ollama's format field to force JSON conforming to the schema
@@ -41,7 +42,7 @@ class OllamaProvider:
         
         logger.debug(f"Sending payload to Ollama: {payload}")
         
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=120.0) as client:
             try:
                 response = await client.post(url, json=payload)
                 response.raise_for_status()
@@ -53,9 +54,26 @@ class OllamaProvider:
                 # Parse response_text into JSON
                 parsed_json = json.loads(response_text)
                 
-                # Validate and instantiate using Pydantic model
-                return expected_schema.model_validate(parsed_json)
+                # Validate using Pydantic model
+                model_inst = expected_schema.model_validate(parsed_json)
                 
+                # Extract token usage from Ollama metadata
+                prompt_tokens = data.get("prompt_eval_count", 0)
+                completion_tokens = data.get("eval_count", 0)
+                total_tokens = prompt_tokens + completion_tokens
+                
+                usage = UsageStats(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
+                    estimated_cost_usd=0.0
+                )
+                
+                return model_inst, usage
+                
+            except httpx.HTTPStatusError as e:
+                logger.error(f"Ollama returned HTTP error status: {e.response.status_code}")
+                raise
             except httpx.HTTPError as e:
                 logger.error(f"HTTP error contacting Ollama: {str(e)}")
                 raise
@@ -64,6 +82,104 @@ class OllamaProvider:
                 raise ValueError(f"Ollama returned invalid JSON: {str(e)}")
             except Exception as e:
                 logger.error(f"Validation or unexpected error: {str(e)}")
+                raise
+
+class OpenRouterProvider:
+    def __init__(self, api_key: str = None, model: str = None):
+        self.api_key = api_key or settings.OPENROUTER_API_KEY
+        self.model = model or settings.OPENROUTER_MODEL
+        logger.info(f"OpenRouterProvider initialized with model={self.model}")
+
+    async def generate_json(self, prompt: str, expected_schema: Type[BaseModel]) -> tuple[BaseModel, UsageStats]:
+        if not self.api_key:
+            raise ValueError("OpenRouter API key is missing. Set OPENROUTER_API_KEY in your config/.env file.")
+
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "http://localhost:8000",
+            "X-Title": "TaskForge"
+        }
+        
+        # Enforce json_object mode and pass the expected schema description in the system prompt
+        schema_desc = json.dumps(expected_schema.model_json_schema(), indent=2)
+        system_prompt = (
+            "You are a helpful software architecture assistant.\n"
+            "You MUST return a JSON object that adheres EXACTLY to the following JSON Schema:\n"
+            f"{schema_desc}\n"
+            "Output only the raw JSON object, without markdown block wrappers or extra text."
+        )
+        
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.1
+        }
+        
+        logger.debug(f"Sending payload to OpenRouter: {payload}")
+        
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            try:
+                response = await client.post(url, json=payload, headers=headers)
+                response.raise_for_status()
+                data = response.json()
+                
+                # Catch API errors
+                if "error" in data:
+                    err_msg = data["error"].get("message", "Unknown OpenRouter error")
+                    raise ValueError(f"OpenRouter API returned error: {err_msg}")
+                    
+                response_text = data["choices"][0]["message"]["content"].strip()
+                logger.debug(f"Raw OpenRouter response: {response_text}")
+                
+                parsed_json = json.loads(response_text)
+                model_inst = expected_schema.model_validate(parsed_json)
+                
+                # Extract token usage
+                usage_data = data.get("usage", {})
+                prompt_tokens = usage_data.get("prompt_tokens", 0)
+                completion_tokens = usage_data.get("completion_tokens", 0)
+                total_tokens = usage_data.get("total_tokens", 0)
+                
+                # Price per 1M tokens mapping: (input_cost_usd, output_cost_usd)
+                PRICING = {
+                    "google/gemini-2.5-flash:free": (0.0, 0.0),
+                    "google/gemini-2.5-flash": (0.075, 0.30),
+                    "mistralai/mistral-nemo:free": (0.0, 0.0),
+                    "mistralai/mistral-nemo": (0.17, 0.17),
+                    "openai/gpt-4o-mini": (0.150, 0.60),
+                }
+                
+                rates = PRICING.get(self.model, (0.150, 0.60))  # Default fallback gpt-4o-mini
+                input_cost = (prompt_tokens * rates[0]) / 1_000_000
+                output_cost = (completion_tokens * rates[1]) / 1_000_000
+                estimated_cost = input_cost + output_cost
+                
+                usage = UsageStats(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
+                    estimated_cost_usd=estimated_cost
+                )
+                
+                return model_inst, usage
+                
+            except httpx.HTTPStatusError as e:
+                logger.error(f"OpenRouter returned HTTP error status: {e.response.status_code} - {e.response.text}")
+                raise
+            except httpx.HTTPError as e:
+                logger.error(f"HTTP error contacting OpenRouter: {str(e)}")
+                raise
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to decode response as JSON: {response_text}. Error: {str(e)}")
+                raise ValueError(f"OpenRouter returned invalid JSON: {str(e)}")
+            except Exception as e:
+                logger.error(f"Validation or unexpected error in OpenRouter call: {str(e)}")
                 raise
 
 class MockLLMProvider:
@@ -158,7 +274,9 @@ class MockLLMProvider:
             "dep_build": ["dep_env"]
         }
 
-    async def generate_json(self, prompt: str, expected_schema: Type[BaseModel]) -> BaseModel:
+    async def generate_json(self, prompt: str, expected_schema: Type[BaseModel]) -> tuple[BaseModel, UsageStats]:
+        usage = UsageStats(prompt_tokens=100, completion_tokens=150, total_tokens=250, estimated_cost_usd=0.00015)
+        
         # Check target schema type
         if expected_schema is CategoriesResponse:
             if re.search(r"web app|website", prompt, re.IGNORECASE):
@@ -167,7 +285,7 @@ class MockLLMProvider:
                 categories = ["UI Design", "API Integration", "iOS App", "Android App"]
             else:
                 categories = ["Planning", "Development", "Testing", "Deployment"]
-            return CategoriesResponse(categories=categories)
+            return CategoriesResponse(categories=categories), usage
 
         elif expected_schema is TasksResponse:
             # Try to identify category in prompt (e.g. Category to focus on: "Frontend")
@@ -176,25 +294,21 @@ class MockLLMProvider:
             
             # Fetch predefined tasks or fallback to generic Development
             tasks = self.category_tasks.get(category_name, self.category_tasks["Development"])
-            return TasksResponse(tasks=tasks)
+            return TasksResponse(tasks=tasks), usage
 
         elif expected_schema is DependencyMapResponse:
             # Parse prompt to see what task IDs are in the tree
-            # For each task ID, if it has a predefined dependency that is also in the tree, add it
-            # Scan prompt using regex for all ids
             found_ids = set(re.findall(r'"id":\s*["\']([^"\']+)["\']', prompt))
             if not found_ids:
-                # If tree is passed as dictionary representation, search for keys or 'id'
                 found_ids = set(re.findall(r"'id':\s*['\"]([^'\"]+)['\"]", prompt))
             
             dependencies = {}
             for task_id in found_ids:
                 deps = self.predefined_dependencies.get(task_id, [])
-                # Only include dependency if its target exists in the generated tree
                 filtered_deps = [d for d in deps if d in found_ids]
                 dependencies[task_id] = filtered_deps
                 
-            return DependencyMapResponse(dependencies=dependencies)
+            return DependencyMapResponse(dependencies=dependencies), usage
 
         raise ValueError(f"MockLLMProvider does not support target schema: {expected_schema}")
 
@@ -207,7 +321,7 @@ class FailingMockLLM(MockLLMProvider):
         super().__init__()
         self.call_count = 0
 
-    async def generate_json(self, prompt: str, expected_schema: Type[BaseModel]) -> BaseModel:
+    async def generate_json(self, prompt: str, expected_schema: Type[BaseModel]) -> tuple[BaseModel, UsageStats]:
         self.call_count += 1
         if self.call_count <= 2:
             logger.warning(f"FailingMockLLM simulating failure (call_count={self.call_count})")

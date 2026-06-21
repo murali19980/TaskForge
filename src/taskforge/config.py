@@ -6,7 +6,11 @@ class Settings(BaseSettings):
     
     OLLAMA_HOST: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "qwen2.5-coder:3b"
+    OPENROUTER_API_KEY: str | None = None
+    OPENROUTER_MODEL: str = "google/gemini-2.5-flash"
     DATABASE_URL: str = "sqlite+aiosqlite:///./taskforge.db"
+    CORS_ORIGINS: str = "http://localhost:8501"
+    API_KEY: str | None = None
     LOG_LEVEL: str = "INFO"
 
 # Instantiate global settings

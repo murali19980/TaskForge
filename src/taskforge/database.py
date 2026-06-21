@@ -1,7 +1,7 @@
 import logging
 from typing import AsyncGenerator
 from datetime import datetime
-from sqlalchemy import Integer, String, DateTime, JSON, func
+from sqlalchemy import Integer, String, DateTime, JSON, Float, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from taskforge.config import settings
@@ -15,12 +15,25 @@ class Project(Base):
     __tablename__ = "projects"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    goal: Mapped[str] = mapped_column(String, nullable=False)
+    goal: Mapped[str] = mapped_column(String, index=True, nullable=False)
     task_tree_json: Mapped[dict] = mapped_column(JSON, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    estimated_cost_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, index=True, default=func.now())
 
-# Create engine and async session maker
-engine = create_async_engine(settings.DATABASE_URL, echo=False)
+# Configure engine arguments. 
+# Connection pooling settings (pool_size, max_overflow) are ignored by SQLite but vital for PostgreSQL/MySQL
+engine_args = {}
+if not settings.DATABASE_URL.startswith("sqlite"):
+    engine_args.update({
+        "pool_size": 10,
+        "max_overflow": 20,
+        "pool_recycle": 3600
+    })
+
+engine = create_async_engine(settings.DATABASE_URL, echo=False, **engine_args)
 async_session_factory = async_sessionmaker(
     bind=engine, 
     expire_on_commit=False, 
@@ -38,7 +51,8 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
         try:
             yield session
             await session.commit()
-        except Exception:
+        except Exception as e:
+            logger.error(f"Database error occurred: {str(e)}, performing rollback.")
             await session.rollback()
             raise
         finally:

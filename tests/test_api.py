@@ -37,9 +37,18 @@ async def override_get_session():
         finally:
             await session.close()
 
+# Bypass API key authentication for API tests
+from taskforge.config import settings
+settings.API_KEY = None
+
 def override_get_engine():
     # Use MockLLMProvider for API tests to avoid calling real Ollama endpoint
-    return TaskForgeEngine(llm=MockLLMProvider())
+    mock_provider = MockLLMProvider()
+    return TaskForgeEngine(
+        architect_provider=mock_provider,
+        specialist_provider=mock_provider,
+        refiner_provider=mock_provider
+    )
 
 # Apply dependency overrides
 app.dependency_overrides[get_session] = override_get_session
@@ -52,11 +61,12 @@ async def test_decompose_endpoint_success():
         assert response.status_code == 200
         
         data = response.json()
-        assert data["goal"] == "Build a web app"
-        assert len(data["categories"]) > 0
+        assert "task_tree" in data
+        assert data["task_tree"]["goal"] == "Build a web app"
+        assert len(data["task_tree"]["categories"]) > 0
         
         # Verify schema structure of categories and tasks
-        category = data["categories"][0]
+        category = data["task_tree"]["categories"][0]
         assert "name" in category
         assert "tasks" in category
         assert len(category["tasks"]) > 0
@@ -67,6 +77,8 @@ async def test_decompose_endpoint_success():
         assert "description" in task
         assert "estimated_hours" in task
         assert "dependencies" in task
+        assert "usage" in data
+        assert data["cached"] is False
 
 @pytest.mark.asyncio
 async def test_decompose_endpoint_validation_error():
@@ -96,3 +108,48 @@ async def test_list_projects_endpoint():
         assert "task_tree" in data[0]
         assert "id" in data[0]
         assert "created_at" in data[0]
+        assert "usage" in data[0]
+
+@pytest.mark.asyncio
+async def test_decompose_caching():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        # First call - fresh generation
+        resp1 = await ac.post("/decompose", json={"goal": "Unique Cache Test"})
+        assert resp1.status_code == 200
+        assert resp1.json()["cached"] is False
+        
+        # Second call - loaded from cache
+        resp2 = await ac.post("/decompose", json={"goal": "Unique Cache Test"})
+        assert resp2.status_code == 200
+        assert resp2.json()["cached"] is True
+
+@pytest.mark.asyncio
+async def test_list_projects_pagination():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        # Add 3 projects
+        await ac.post("/decompose", json={"goal": "Project A"})
+        await ac.post("/decompose", json={"goal": "Project B"})
+        await ac.post("/decompose", json={"goal": "Project C"})
+        
+        # Test Limit 2
+        res_limit = await ac.get("/projects?limit=2")
+        assert res_limit.status_code == 200
+        assert len(res_limit.json()) == 2
+        
+        # Test Offset 2
+        res_offset = await ac.get("/projects?limit=2&offset=2")
+        assert res_offset.status_code == 200
+        assert len(res_offset.json()) == 1
+
+@pytest.mark.asyncio
+async def test_health_check_endpoint():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        response = await ac.get("/health")
+        # Health check might return 503 if local Ollama server is not running, which is expected.
+        # But it should return a valid JSON structure describing components health.
+        assert response.status_code in (200, 503)
+        data = response.json()
+        assert "status" in data
+        assert "database" in data
+        assert "ollama" in data
+        assert "openrouter" in data
