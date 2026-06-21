@@ -1,39 +1,111 @@
-# TaskForge
+# TaskForge ⚒️
 
-TaskForge is a recursive AI task decomposition engine powered by local Ollama models. It decomposes high-level user goals into structured, hierarchical categories and tasks with auto-detected dependency relationships, storing the generated project trees in a SQLite database.
+TaskForge is a production-grade, recursive AI task decomposition engine. It translates high-level project goals into structured, validated directed acyclic graph (DAG) project plans, featuring parallel model execution, resilient fallback mechanics, cost limits, and real-time streaming progress.
 
-## Features
+It operates in a hybrid mode, utilizing cloud-hosted OpenRouter models for architecture planning and PM refinement, and local Ollama models for specialist tasks, or can be run completely offline.
+
+---
+
+## Key Features
 
 - **Recursive Map-Reduce Decomposition**:
-  - **Map (Architect)**: Generates high-level project categories.
-  - **Reduce (Specialists)**: Concurrently generates granular tasks for each category under rate-limiting semaphores.
-  - **Refine (Project Manager)**: Computes task dependencies and constructs a valid directed acyclic graph (DAG).
-- **Strict Pydantic Validation**: Automatically validates schema adherence, task ID uniqueness, and dependency resolution.
-- **Dependency Cycle Detection**: Ensures no circular dependencies exist before finalizing the task tree.
-- **Local Ollama Integration**: Powered by `qwen2.5-coder:3b` with forced JSON schema mode.
-- **Robust Error Handling**: Retry mechanisms with exponential backoff on LLM call validation errors.
+  - **Map (Architect)**: Analyzes goals and maps high-level categories.
+  - **Reduce (Specialists)**: Concurrently generates granular task listings for each category.
+  - **Refine (Project Manager)**: Calculates inter-task dependency relationships and validates the resulting DAG.
+- **Strict Validation & Cycle Prevention**: Automatically prevents duplicate IDs, checks for missing dependencies, and runs topological sorting to detect and block cyclic dependencies.
+- **Production Hardening (Phase 2.5)**:
+  - **Free-Model Validator**: Pydantic settings validation blocks paid models on startup, preventing unintended cloud billing.
+  - **Rate-Limit Resiliency**: Intercepts `HTTP 429` responses from OpenRouter, parses `Retry-After` headers, and automatically retries with backoff.
+  - **Fallback Chain**: Gracefully degrades: Primary Model $\rightarrow$ `openrouter/free` router $\rightarrow$ local Ollama fallback.
+  - **Per-Provider Concurrency**: Independent semaphores prevent queuing bottlenecks on local models while maximizing cloud throughput.
+  - **Granular Quota-Safe Health Check**: The `/health` endpoint checks SQLite, Ollama, and OpenRouter (using `/auth/key` to bypass model quotas).
+  - **Input & Cost Limits**: Caps input lengths to 2000 characters and generation costs to $0.01 per request.
+  - **Real-Time Streaming Progress**: Streams Server-Sent Events (SSE) from the FastAPI backend to Streamlit for real-time specialist task generation progress.
+  - **CI/CD & Secret Hooks**: Integrated pre-commit hooks block `.env` checkins or hardcoded secrets, and GitHub Actions verify tests automatically.
 
-## Installation
+---
 
-1. Clone or download the repository.
-2. Initialize and activate a virtual environment:
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-   ```
-3. Install the package and development dependencies:
-   ```bash
-   pip install -e ".[dev]"
-   ```
+## Installation & Setup
 
-## Running the API
+### 1. Clone the Repository
+```bash
+git clone https://github.com/murali19980/TaskForge.git
+cd TaskForge
+```
 
-1. Start the Ollama server and pull the default model:
-   ```bash
-   ollama pull qwen2.5-coder:3b
-   ```
-2. Start the FastAPI development server:
-   ```bash
-   uvicorn src.taskforge.main:app --reload
-   ```
-3. Access the interactive API docs at `http://127.0.0.1:8000/docs`.
+### 2. Configure Virtual Environment
+Initialize and activate a virtual environment:
+```bash
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+```
+
+### 3. Install Package & Dependencies
+Install TaskForge in editable mode with development dependencies:
+```bash
+pip install -e ".[dev]"
+```
+
+### 4. Install Pre-Commit Hooks
+Register the security and formatting hooks with git:
+```bash
+pre-commit install
+```
+
+### 5. Setup Environment Variables
+Create a `.env` file based on `.env.example` (Note: `.env` is ignored by Git to protect your secrets):
+```bash
+cp .env.example .env
+```
+Open `.env` and fill in:
+- `OPENROUTER_API_KEY`: Paste your OpenRouter API key (only free models are allowed, e.g. `google/gemini-2.5-flash:free`).
+- `OLLAMA_HOST`: The endpoint of your local Ollama server (default: `http://localhost:11434`).
+- `OLLAMA_MODEL`: Local model name (default: `qwen2.5-coder:3b`).
+
+---
+
+## Running the Application
+
+### 1. Start Local Ollama Models
+Ensure Ollama is running and download the default model:
+```bash
+ollama serve
+ollama pull qwen2.5-coder:3b
+```
+
+### 2. Start the Backend API (FastAPI)
+Launch the FastAPI uvicorn server:
+```bash
+uvicorn src.taskforge.main:app --reload --port 8000
+```
+- Interactive Swagger docs are available at `http://127.0.0.1:8000/docs`.
+- Health check auditing is at `http://127.0.0.1:8000/health`.
+
+### 3. Start the Frontend Dashboard (Streamlit)
+In a new terminal window (with `.venv` activated), run the dashboard UI:
+```bash
+streamlit run frontend/streamlit_app.py
+```
+Access the application dashboard at `http://localhost:8501`.
+
+---
+
+## Testing & Quality Control
+
+### Running Tests
+Execute the pytest suite (covers Pydantic models, API caches, provider fallbacks, streaming progress, and Streamlit AppTest rendering):
+```bash
+pytest -v
+```
+
+### Running Hooks Manually
+To check all files against the formatting and security secrets hooks manually:
+```bash
+pre-commit run --all-files
+```
+
+---
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
