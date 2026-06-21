@@ -155,6 +155,27 @@ async def test_health_check_endpoint():
         assert "openrouter" in data
 
 @pytest.mark.asyncio
+async def test_health_check_endpoint_authentication(monkeypatch):
+    from taskforge.config import settings
+    monkeypatch.setattr(settings, "API_KEY", "super_secret_test_key")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        # 1. Without credentials: must fail with 401 Unauthorized
+        response_unauthorized = await ac.get("/health")
+        assert response_unauthorized.status_code == 401
+        assert "Invalid or missing API Key" in response_unauthorized.json()["detail"]
+
+        # 2. With invalid credentials: must fail with 401
+        headers_invalid = {"Authorization": "Bearer bad_key"}
+        response_bad = await ac.get("/health", headers=headers_invalid)
+        assert response_bad.status_code == 401
+
+        # 3. With valid credentials: must succeed
+        headers_valid = {"Authorization": "Bearer super_secret_test_key"}
+        response_ok = await ac.get("/health", headers=headers_valid)
+        assert response_ok.status_code in (200, 503)
+
+
+@pytest.mark.asyncio
 async def test_decompose_endpoint_max_input_length():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         long_goal = "x" * 2001

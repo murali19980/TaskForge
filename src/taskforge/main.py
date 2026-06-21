@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import json
 import asyncio
 import os
+import secrets
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,6 +42,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Ollama is unreachable at startup on {settings.OLLAMA_HOST}: {str(e)}")
 
+    # Check if API key is configured
+    if not settings.API_KEY:
+        logger.warning(
+            "CRITICAL SECURITY WARNING: API_KEY environment variable is not configured. "
+            "Access authentication is bypassed. Please configure API_KEY to protect the service."
+        )
+
     yield
     # Shutdown
     pass
@@ -69,7 +77,7 @@ async def verify_api_key(credentials: Optional[HTTPAuthorizationCredentials] = D
     if not settings.API_KEY:
         # Bypassed if API_KEY setting is empty/None
         return None
-    if not credentials or credentials.credentials != settings.API_KEY:
+    if not credentials or not secrets.compare_digest(credentials.credentials, settings.API_KEY):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing API Key"
@@ -304,7 +312,7 @@ async def list_projects(
         )
 
 @app.get("/health")
-async def health(db: AsyncSession = Depends(get_session)):
+async def health(db: AsyncSession = Depends(get_session), _auth = Depends(verify_api_key)):
     health_status = {
         "status": "healthy",
         "database": "unhealthy",
