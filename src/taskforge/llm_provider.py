@@ -14,6 +14,7 @@ from taskforge.models import (
     UsageStats
 )
 from taskforge.config import settings
+from taskforge.exceptions import LLMOutputError
 
 logger = logging.getLogger("taskforge.llm_provider")
 
@@ -69,11 +70,7 @@ def _strip_markdown_json(text: str) -> str:
                     except json.JSONDecodeError:
                         pass
     
-    # 4. Simple non-greedy regex fallback
-    match = re.search(r"(\{[\s\S]*?\})", text)
-    if match:
-        return match.group(1).strip()
-
+    # 4. If brace counter didn't find a complete object, give up cleanly
     return text
 
 
@@ -143,8 +140,8 @@ class OllamaProvider:
                 logger.error(f"HTTP error contacting Ollama: {str(e)}")
                 raise
             except json.JSONDecodeError as e:
-                logger.error(f"Failed to decode response as JSON: {response_text}. Error: {str(e)}")
-                raise ValueError(f"Ollama returned invalid JSON: {str(e)}")
+                logger.error(f"Ollama returned invalid JSON. Error: {str(e)}")
+                raise LLMOutputError(f"Ollama returned invalid JSON: {str(e)}")
             except Exception as e:
                 logger.error(f"Validation or unexpected error: {str(e)}")
                 raise
@@ -274,14 +271,15 @@ class OpenRouterProvider:
                                 await asyncio.sleep(retry_after)
                                 continue
                             else:
-                                logger.error(f"OpenRouter returned HTTP error status: {e.response.status_code} - {e.response.text}")
+                                # Only log the status code — never log response body (may contain account/quota data)
+                                logger.error(f"OpenRouter returned HTTP error status: {e.response.status_code}")
                                 raise
                         except httpx.HTTPError as e:
                             logger.error(f"HTTP error contacting OpenRouter: {str(e)}")
                             raise
                         except json.JSONDecodeError as e:
-                            logger.error(f"Failed to decode response as JSON: {response_text}. Error: {str(e)}")
-                            raise ValueError(f"OpenRouter returned invalid JSON: {str(e)}")
+                            logger.error(f"OpenRouter returned invalid JSON. Error: {str(e)}")
+                            raise LLMOutputError(f"OpenRouter returned invalid JSON: {str(e)}")
                         except Exception as e:
                             logger.error(f"Validation or unexpected error in OpenRouter call: {str(e)}")
                             raise

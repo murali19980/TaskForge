@@ -65,6 +65,9 @@ export function useTaskForge() {
     }
 
     if (api_key !== undefined) {
+      // CRIT-1 (revised): sessionStorage is readable by any JS on the page.
+      // Only use for short-lived development keys. Never store production secrets here.
+      // Use the clearApiKey() method or close the tab to remove.
       sessionStorage.setItem('taskforge_api_key', api_key)
     }
 
@@ -73,6 +76,11 @@ export function useTaskForge() {
     startTime = Date.now()
 
     await runDecomposeStream(sanitizedGoal)
+  }
+
+  /** Remove the stored API key from sessionStorage immediately. */
+  function clearApiKey() {
+    sessionStorage.removeItem('taskforge_api_key')
   }
 
   async function runDecomposeStream(sanitizedGoal: string) {
@@ -361,6 +369,7 @@ export function useTaskForge() {
     fetchHealth,
     reset,
     abortDecomposition,
+    clearApiKey,
     generateCategoryId
   }
 }

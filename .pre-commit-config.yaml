@@ -5,10 +5,9 @@ repos:
       - id: check-yaml
       - id: end-of-file-fixer
       - id: trailing-whitespace
-  - repo: local
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.4.0
     hooks:
-      - id: block-env-and-keys
-        name: Block .env and API keys
-        entry: python scripts/pre_commit_secrets_check.py
-        language: system
-        files: ^.*$
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+        exclude: ^(\.env\.example|tests/|\.secrets\.baseline)$

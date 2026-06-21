@@ -34,28 +34,40 @@ class TaskTree(BaseModel):
                 if dep_id not in all_task_ids:
                     raise ValueError(f"Task '{task_id}' depends on a non-existent task ID '{dep_id}'")
 
-        # Verify cycle detection
-        visited = {}  # node -> state: 0 (unvisited), 1 (visiting), 2 (visited)
+        # Verify cycle detection using iterative DFS (avoids Python recursion limit on large trees)
+        visited: dict[str, int] = {}  # node -> state: 0 (unvisited), 1 (visiting), 2 (visited)
         dep_map = {task.id: task.dependencies for cat in self.categories for task in cat.tasks}
 
-        def has_cycle(node: str) -> bool:
-            state = visited.get(node, 0)
-            if state == 1:
-                return True  # Found a back edge / cycle
-            if state == 2:
-                return False  # Already processed
-
-            visited[node] = 1
-            for neighbor in dep_map.get(node, []):
-                if has_cycle(neighbor):
+        def has_cycle_iterative(start: str) -> bool:
+            # Stack entries: (node, leaving)
+            # 'leaving' marks when we are unwinding back from a node (post-order)
+            stack = [(start, False)]
+            while stack:
+                node, leaving = stack.pop()
+                if leaving:
+                    # Finished processing this node – mark as fully visited
+                    visited[node] = 2
+                    continue
+                state = visited.get(node, 0)
+                if state == 1:
+                    # Found a back edge – cycle detected
                     return True
-            visited[node] = 2
+                if state == 2:
+                    # Already fully processed – skip
+                    continue
+                # Mark as currently being visited
+                visited[node] = 1
+                # Push unwind marker first so it runs after all children
+                stack.append((node, True))
+                for neighbor in dep_map.get(node, []):
+                    stack.append((neighbor, False))
             return False
 
         for node in all_task_ids:
             if visited.get(node, 0) == 0:
-                if has_cycle(node):
+                if has_cycle_iterative(node):
                     raise ValueError(f"Dependency cycle detected involving task '{node}'")
+
 
         return self
 

@@ -61,6 +61,16 @@ class Settings(BaseSettings):
                     )
         return v
 
+    @field_validator("LOG_LEVEL")
+    @classmethod
+    def validate_log_level(cls, v: str) -> str:
+        valid = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+        if v.upper() not in valid:
+            raise ValueError(
+                f"LOG_LEVEL '{v}' is invalid. Must be one of: {', '.join(sorted(valid))}"
+            )
+        return v.upper()
+
 # Instantiate global settings
 settings = Settings()
 

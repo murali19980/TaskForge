@@ -1,7 +1,7 @@
 import logging
 from typing import AsyncGenerator
-from datetime import datetime
-from sqlalchemy import Integer, String, DateTime, JSON, Float, func
+from datetime import datetime, timezone
+from sqlalchemy import Integer, String, DateTime, JSON, Float
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from taskforge.config import settings
@@ -21,7 +21,11 @@ class Project(Base):
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     total_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     estimated_cost_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, index=True, default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        index=True,
+        default=lambda: datetime.now(timezone.utc)
+    )
 
 # Configure engine arguments.
 # Connection pooling settings (pool_size, max_overflow) are ignored by SQLite but vital for PostgreSQL/MySQL

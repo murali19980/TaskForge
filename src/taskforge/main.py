@@ -1,5 +1,6 @@
 import logging
 from contextlib import asynccontextmanager
+from importlib.metadata import version as pkg_version
 from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, status, Security, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -28,13 +29,60 @@ from taskforge.engine import TaskForgeEngine
 
 logger = logging.getLogger("taskforge.main")
 
+# Background task registry – prevents asyncio from GC-ing running tasks (MED-3)
+_background_tasks: set = set()
+
+
+def _create_engine() -> TaskForgeEngine:
+    """Construct the TaskForgeEngine with the appropriate LLM provider configuration."""
+    if settings.OPENROUTER_API_KEY:
+        logger.info("Initializing TaskForgeEngine in hybrid mode (OpenRouter Architect/Refiner + Ollama Specialists)")
+        architect = OpenRouterProvider()
+        specialist = OllamaProvider()
+        refiner = OpenRouterProvider()
+    else:
+        logger.info("Initializing TaskForgeEngine in local-only mode (Ollama for all steps)")
+        architect = OllamaProvider()
+        specialist = OllamaProvider()
+        refiner = OllamaProvider()
+    return TaskForgeEngine(
+        architect_provider=architect,
+        specialist_provider=specialist,
+        refiner_provider=refiner
+    )
+
+
 class DecomposeRequest(BaseModel):
     goal: str = Field(..., min_length=1, max_length=2000, description="The high-level goal to decompose")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # CRIT-2: Enforce API_KEY in non-development environments
+    env = os.getenv("ENV", "development").lower()
+    if not settings.API_KEY:
+        if env != "development":
+            raise RuntimeError(
+                "FATAL: API_KEY environment variable is not set. "
+                "TaskForge refuses to start in non-development mode without authentication. "
+                "Set ENV=development to bypass this check (local use only)."
+            )
+        logger.warning(
+            "SECURITY WARNING: API_KEY is not configured – running in unauthenticated development mode. "
+            "Set API_KEY in your .env to enable authentication."
+        )
+
+    # HIGH-6: Warn if running in production without HTTPS
+    if env == "production":
+        logger.warning(
+            "PRODUCTION MODE: Ensure the service is behind a TLS-terminating reverse proxy (e.g. Nginx + Let's Encrypt). "
+            "Transmitting Bearer tokens over plain HTTP is a critical security risk."
+        )
+
     # Startup: initialize database tables
     await init_db()
+
+    # MED-6: Construct engine singleton once – semaphores are shared across all requests
+    app.state.engine = _create_engine()
 
     # Check Ollama connectivity and log status
     try:
@@ -47,21 +95,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Ollama is unreachable at startup on {settings.OLLAMA_HOST}: {str(e)}")
 
-    # Check if API key is configured
-    if not settings.API_KEY:
-        logger.warning(
-            "CRITICAL SECURITY WARNING: API_KEY environment variable is not configured. "
-            "Access authentication is bypassed. Please configure API_KEY to protect the service."
-        )
-
     yield
-    # Shutdown
-    pass
+    # Shutdown – cancel any remaining background tasks
+    for t in list(_background_tasks):
+        t.cancel()
+
+
+try:
+    _api_version = pkg_version("taskforge")
+except Exception:
+    _api_version = "1.0.0"
 
 app = FastAPI(
     title="TaskForge API",
     description="Recursive AI task decomposition engine using local Ollama and OpenRouter models",
-    version="0.1.0",
+    version=_api_version,
     lifespan=lifespan
 )
 
@@ -88,17 +136,8 @@ if origins:
 # API Bearer Security
 security = HTTPBearer(auto_error=False)
 
-async def verify_api_key(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
-    if not settings.API_KEY:
-        # Bypassed if API_KEY setting is empty/None
-        return None
-    if not credentials or not secrets.compare_digest(credentials.credentials, settings.API_KEY):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing API Key"
-        )
-    return credentials.credentials
 
+# API exception handlers
 @app.exception_handler(PydanticValidationError)
 async def validation_exception_handler(request, exc: PydanticValidationError):
     logger.error(f"Pydantic validation error: {exc.errors()}")
@@ -115,24 +154,22 @@ async def validation_error_handler(request, exc: ValidationError):
         content={"detail": str(exc), "message": "Invalid request parameter"}
     )
 
-def get_engine() -> TaskForgeEngine:
-    # If OpenRouter is configured, setup hybrid pipeline. Else fallback to Ollama for all steps.
-    if settings.OPENROUTER_API_KEY:
-        logger.info("Initializing TaskForgeEngine in hybrid mode (OpenRouter Architect/Refiner + Ollama Specialists)")
-        architect = OpenRouterProvider()
-        specialist = OllamaProvider()
-        refiner = OpenRouterProvider()
-    else:
-        logger.info("Initializing TaskForgeEngine in local-only mode (Ollama for all steps)")
-        architect = OllamaProvider()
-        specialist = OllamaProvider()
-        refiner = OllamaProvider()
+async def verify_api_key(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
+    if not settings.API_KEY:
+        # Dev mode: log a per-request warning and allow the call
+        logger.debug("API_KEY not set – unauthenticated access allowed (development mode only)")
+        return None
+    if not credentials or not secrets.compare_digest(credentials.credentials, settings.API_KEY):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API Key"
+        )
+    return credentials.credentials
 
-    return TaskForgeEngine(
-        architect_provider=architect,
-        specialist_provider=specialist,
-        refiner_provider=refiner
-    )
+
+def get_engine(request: Request) -> TaskForgeEngine:
+    """Return the shared engine singleton stored on app.state during lifespan startup."""
+    return request.app.state.engine
 
 @app.post("/decompose", response_model=DecomposeResponse)
 @limiter.limit(f"{settings.RATE_LIMIT_PER_MINUTE}/minute")
@@ -243,7 +280,8 @@ async def decompose_stream(
                 return
 
             # 2. Run the decomposition engine with progress callbacks
-            queue = asyncio.Queue()
+            # MED-2: Bounded queue prevents unbounded memory growth if client is slow
+            queue: asyncio.Queue = asyncio.Queue(maxsize=50)
 
             async def on_progress(event_data: dict):
                 await queue.put(event_data)
@@ -282,8 +320,10 @@ async def decompose_stream(
                 finally:
                     await queue.put(None)
 
-            # Spawn decomposition background task
+            # MED-3: Keep strong reference to task so GC doesn't cancel it mid-execution
             task = asyncio.create_task(run_decomposition())
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
 
             while True:
                 item = await queue.get()
@@ -301,7 +341,9 @@ async def decompose_stream(
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.get("/projects")
+@limiter.limit("30/minute")
 async def list_projects(
+    request: Request,
     limit: int = 10,
     offset: int = 0,
     db: AsyncSession = Depends(get_session),
@@ -339,11 +381,12 @@ async def list_projects(
         logger.exception("Failed to query projects")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Database query failed: {str(e)}"
+            detail="Failed to retrieve projects. Check server logs."
         )
 
 @app.get("/health")
-async def health(db: AsyncSession = Depends(get_session), _auth = Depends(verify_api_key)):
+@limiter.limit("10/minute")
+async def health(request: Request, db: AsyncSession = Depends(get_session), _auth = Depends(verify_api_key)):
     health_status = {
         "status": "healthy",
         "database": "unhealthy",

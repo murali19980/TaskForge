@@ -660,6 +660,16 @@ async function exportPdf() {
   }
 }
 
+// HTML escape helper – prevents XSS in generated Word/HTML documents (IMP-4)
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;')
+}
+
 // Export Word document functionality
 async function exportWord() {
   isExporting.value = true
@@ -673,21 +683,21 @@ async function exportWord() {
       let tasksHtml = ''
       cat.tasks.forEach(task => {
         const deps = task.dependencies.length > 0
-          ? `<p class="dependencies"><strong>Dependencies:</strong> ${task.dependencies.join(', ')}</p>`
+          ? `<p class="dependencies"><strong>Dependencies:</strong> ${task.dependencies.map(escapeHtml).join(', ')}</p>`
           : ''
         tasksHtml += `
           <div class="task-card">
-            <span class="task-id">${task.id}</span>
+            <span class="task-id">${escapeHtml(task.id)}</span>
             <span class="task-hours">${task.estimated_hours}h</span>
-            <div class="task-title" style="margin-top: 6px;">${task.title}</div>
-            <p style="margin: 6px 0; color: #4b5563; font-size: 13px;">${task.description}</p>
+            <div class="task-title" style="margin-top: 6px;">${escapeHtml(task.title)}</div>
+            <p style="margin: 6px 0; color: #4b5563; font-size: 13px;">${escapeHtml(task.description)}</p>
             ${deps}
           </div>
         `
       })
 
       categoriesHtml += `
-        <h2>${cIdx + 1}. ${cat.name}</h2>
+        <h2>${cIdx + 1}. ${escapeHtml(cat.name)}</h2>
         ${tasksHtml}
       `
     })
@@ -695,7 +705,7 @@ async function exportWord() {
     const htmlString = `
       <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
       <head>
-        <title>TaskForge Export - ${props.taskTree.goal}</title>
+        <title>TaskForge Export - ${escapeHtml(props.taskTree.goal)}</title>
         <style>
           body { font-family: 'Segoe UI', Arial, sans-serif; margin: 40px; color: #1f2937; }
           h1 { color: #1e3a8a; border-bottom: 2px solid #e5e7eb; padding-bottom: 8px; font-size: 24px; }
@@ -711,7 +721,7 @@ async function exportWord() {
       <body>
         <h1>TaskForge Project Plan</h1>
         <div class="meta">
-          <p><strong>Goal:</strong> ${props.taskTree.goal}</p>
+          <p><strong>Goal:</strong> ${escapeHtml(props.taskTree.goal)}</p>
           <p><strong>Total Estimated Hours:</strong> ${totalHours.value}h | <strong>Categories:</strong> ${props.taskTree.categories.length} | <strong>Total Tasks:</strong> ${totalTasks.value}</p>
           <p style="margin-top: 4px; font-size: 11px; color: #9ca3af;">Generated via TaskForge on ${new Date().toLocaleString()}</p>
         </div>
@@ -729,6 +739,7 @@ async function exportWord() {
     isExporting.value = false
   }
 }
+
 
 // Cleanup cyInstance on component destroy
 onBeforeUnmount(() => {
