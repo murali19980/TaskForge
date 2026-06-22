@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     MAX_COST_PER_REQUEST: float = 0.01
     LLM_REQUEST_TIMEOUT: int = 120
     RATE_LIMIT_PER_MINUTE: int = 5
+    GLOBAL_DECOMPOSE_TIMEOUT: int = 300
 
     @property
     def openrouter_model_list(self) -> list[str]:

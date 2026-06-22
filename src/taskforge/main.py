@@ -54,7 +54,6 @@ def _create_engine() -> TaskForgeEngine:
 
 class DecomposeRequest(BaseModel):
     goal: str = Field(..., min_length=1, max_length=2000, description="The high-level goal to decompose")
-    api_key: Optional[str] = Field(default=None, description="Optional OpenRouter API key supplied by client")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -142,9 +141,14 @@ security = HTTPBearer(auto_error=False)
 @app.exception_handler(PydanticValidationError)
 async def validation_exception_handler(request, exc: PydanticValidationError):
     logger.error(f"Pydantic validation error: {exc.errors()}")
+    env = os.getenv("ENV", "development").lower()
+    if env == "development":
+        detail = exc.errors()
+    else:
+        detail = "Validation failed. Details hidden for security."
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content={"detail": exc.errors(), "message": "Structured output validation failed"}
+        content={"detail": detail, "message": "Structured output validation failed"}
     )
 
 @app.exception_handler(ValidationError)
@@ -206,7 +210,7 @@ async def decompose(
             return DecomposeResponse(task_tree=tree, usage=usage, cached=True)
 
         # 2. Run the decomposition engine
-        response = await engine.decompose_goal(payload.goal, api_key=payload.api_key)
+        response = await engine.decompose_goal(payload.goal)
 
         # Check cost limit
         if response.usage.estimated_cost_usd > settings.MAX_COST_PER_REQUEST:
@@ -225,8 +229,7 @@ async def decompose(
             estimated_cost_usd=response.usage.estimated_cost_usd
         )
         db.add(db_project)
-        # Flush to DB (get_session will commit automatically)
-        await db.flush()
+        await db.commit()
 
         return response
     except HTTPException:
@@ -289,7 +292,7 @@ async def decompose_stream(
 
             async def run_decomposition():
                 try:
-                    response = await engine.decompose_goal(payload.goal, api_key=payload.api_key, on_progress=on_progress)
+                    response = await engine.decompose_goal(payload.goal, on_progress=on_progress)
 
                     # Check cost limit
                     if response.usage.estimated_cost_usd > settings.MAX_COST_PER_REQUEST:
@@ -309,7 +312,7 @@ async def decompose_stream(
                         estimated_cost_usd=response.usage.estimated_cost_usd
                     )
                     db.add(db_project)
-                    await db.flush()
+                    await db.commit()
 
                     await queue.put({"event": "done", "data": response.model_dump()})
                 except ValidationError as ex:
@@ -319,15 +322,31 @@ async def decompose_stream(
                     logger.exception("Decomposition stream failed in run_decomposition")
                     await queue.put({"event": "error", "message": "Internal decomposition error. Check server logs."})
                 finally:
-                    await queue.put(None)
+                    try:
+                        await asyncio.wait_for(queue.put(None), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        logger.warning("SSE queue put(None) timed out. Falling back to put_nowait.")
+                        try:
+                            queue.put_nowait(None)
+                        except asyncio.QueueFull:
+                            logger.error("SSE queue is full. Could not put None sentinel.")
 
             # MED-3: Keep strong reference to task so GC doesn't cancel it mid-execution
-            task = asyncio.create_task(run_decomposition())
-            _background_tasks.add(task)
-            task.add_done_callback(_background_tasks.discard)
+            decompose_task = asyncio.create_task(run_decomposition())
+            _background_tasks.add(decompose_task)
+            decompose_task.add_done_callback(_background_tasks.discard)
 
             while True:
-                item = await queue.get()
+                if await request.is_disconnected():
+                    logger.warning("Client disconnected from SSE stream. Cancelling background decomposition task.")
+                    decompose_task.cancel()
+                    break
+
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+
                 if item is None:
                     break
                 yield f"data: {json.dumps(item)}\n\n"

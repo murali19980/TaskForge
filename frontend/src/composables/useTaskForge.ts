@@ -96,8 +96,7 @@ export function useTaskForge() {
         method: 'POST',
         headers,
         body: JSON.stringify({
-          goal: sanitizedGoal,
-          api_key: globalApiKey.value || null
+          goal: sanitizedGoal
         }),
         signal: controller.signal
       })

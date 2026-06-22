@@ -88,8 +88,7 @@ class TaskForgeEngine:
         self,
         provider: BaseLLMProvider,
         prompt: str,
-        schema: Type[BaseModel],
-        api_key: Optional[str] = None
+        schema: Type[BaseModel]
     ) -> tuple[BaseModel, UsageStats]:
         # Select the correct semaphore based on provider type
         if isinstance(provider, OpenRouterProvider) or provider.__class__.__name__ == "OpenRouterProvider":
@@ -101,10 +100,7 @@ class TaskForgeEngine:
         try:
             logger.debug(f"Calling LLM provider {provider.__class__.__name__} ({getattr(provider, 'model', 'N/A')}) with prompt preview: {prompt[:100]}...")
             async with sem:
-                if isinstance(provider, OpenRouterProvider) or provider.__class__.__name__ == "OpenRouterProvider":
-                    coro = provider.generate_json(prompt, schema, client_api_key=api_key)
-                else:
-                    coro = provider.generate_json(prompt, schema)
+                coro = provider.generate_json(prompt, schema)
                 result, usage = await asyncio.wait_for(
                     coro,
                     timeout=float(self.config.LLM_REQUEST_TIMEOUT)
@@ -120,14 +116,13 @@ class TaskForgeEngine:
         self,
         provider: BaseLLMProvider,
         prompt: str,
-        schema: Type[BaseModel],
-        api_key: Optional[str] = None
+        schema: Type[BaseModel]
     ) -> tuple[BaseModel, UsageStats]:
         """Call LLM provider with per-provider semaphores, timeout, and model fallback chain."""
         is_openrouter = isinstance(provider, OpenRouterProvider) or provider.__class__.__name__ == "OpenRouterProvider"
 
         try:
-            return await self._execute_provider_call(provider, prompt, schema, api_key=api_key)
+            return await self._execute_provider_call(provider, prompt, schema)
         except Exception as e:
             if not is_openrouter:
                 logger.error(f"Provider {provider.__class__.__name__} failed: {e}")
@@ -141,7 +136,7 @@ class TaskForgeEngine:
                 )
                 try:
                     fallback_provider = OpenRouterProvider(api_key=getattr(provider, "api_key", None), model="openrouter/free")
-                    return await self._execute_provider_call(fallback_provider, prompt, schema, api_key=api_key)
+                    return await self._execute_provider_call(fallback_provider, prompt, schema)
                 except Exception as fallback_err:
                     logger.warning(
                         f"Fallback OpenRouter model 'openrouter/free' failed with error: {fallback_err}. "
@@ -164,10 +159,10 @@ class TaskForgeEngine:
         retry=retry_if_exception_type((PydanticValidationError, httpx.HTTPError, LLMOutputError, TimeoutError)),
         reraise=True,
         before_sleep=lambda retry_state: logger.warning(
-            f"Error occurred. Retrying decompose_goal attempt {retry_state.attempt_number}..."
+            f"Error occurred. Retrying _run_decompose_goal attempt {retry_state.attempt_number}..."
         )
     )
-    async def decompose_goal(self, goal: str, api_key: Optional[str] = None, on_progress = None) -> DecomposeResponse:
+    async def _run_decompose_goal(self, goal: str, on_progress = None) -> DecomposeResponse:
         """
         Decomposes a high-level goal into a full TaskTree structure.
         Uses a map-reduce pattern with token tracking:
@@ -197,7 +192,7 @@ class TaskForgeEngine:
 
         architect_prompt = ARCHITECT_PROMPT.format(goal=prompt_goal)
         categories_resp, arch_usage = await self._call_llm_with_timeout(
-            self.architect_provider, architect_prompt, CategoriesResponse, api_key=api_key
+            self.architect_provider, architect_prompt, CategoriesResponse
         )
         categories_list = categories_resp.categories
         logger.info(f"Architect generated categories: {categories_list}")
@@ -218,7 +213,7 @@ class TaskForgeEngine:
             logger.info(f"Generating tasks for category: {category_name}")
             specialist_prompt = SPECIALIST_PROMPT.format(goal=prompt_goal, category=category_name)
             tasks_resp, spec_usage = await self._call_llm_with_timeout(
-                self.specialist_provider, specialist_prompt, TasksResponse, api_key=api_key
+                self.specialist_provider, specialist_prompt, TasksResponse
             )
             # Prefix task IDs with category slug to prevent duplicate collisions across categories
             cat_slug = re.sub(r'[^a-z0-9]+', '_', category_name.lower()).strip('_')
@@ -252,7 +247,7 @@ class TaskForgeEngine:
 
         refiner_prompt = REFINER_PROMPT.format(goal=prompt_goal, tree=tree_json)
         dep_resp, ref_usage = await self._call_llm_with_timeout(
-            self.refiner_provider, refiner_prompt, DependencyMapResponse, api_key=api_key
+            self.refiner_provider, refiner_prompt, DependencyMapResponse
         )
         dependency_map = dep_resp.dependencies
         logger.info(f"PM Refiner generated dependency map: {dependency_map}")
@@ -289,3 +284,14 @@ class TaskForgeEngine:
 
         logger.info(f"Goal successfully decomposed. Total tokens used: {total_tokens}, cost: ${total_cost:.5f}")
         return DecomposeResponse(task_tree=final_tree, usage=usage, cached=False)
+
+    async def decompose_goal(self, goal: str, on_progress = None) -> DecomposeResponse:
+        try:
+            return await asyncio.wait_for(
+                self._run_decompose_goal(goal, on_progress=on_progress),
+                timeout=float(self.config.GLOBAL_DECOMPOSE_TIMEOUT)
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Global decomposition pipeline timed out after {self.config.GLOBAL_DECOMPOSE_TIMEOUT} seconds")
+            raise TimeoutError(f"Decomposition timed out after {self.config.GLOBAL_DECOMPOSE_TIMEOUT} seconds")
+

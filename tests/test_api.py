@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 
 from taskforge.main import app, get_engine
 from taskforge.database import Base, get_session, Project
-from taskforge.llm_provider import MockLLMProvider
+from tests.mocks import MockLLMProvider
 from taskforge.engine import TaskForgeEngine
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"

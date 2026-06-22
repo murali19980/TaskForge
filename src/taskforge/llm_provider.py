@@ -99,7 +99,9 @@ class OllamaProvider:
             }
         }
 
-        logger.debug(f"Sending payload to Ollama: {payload}")
+        import hashlib
+        prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()[:12]
+        logger.debug(f"Sending request to Ollama with prompt hash: {prompt_hash}")
 
         async with httpx.AsyncClient(timeout=float(settings.LLM_REQUEST_TIMEOUT)) as client:
             try:
@@ -108,7 +110,8 @@ class OllamaProvider:
                 data = response.json()
                 response_text = data.get("response", "").strip()
 
-                logger.debug(f"Raw Ollama response: {response_text}")
+                response_hash = hashlib.sha256(response_text.encode()).hexdigest()[:12]
+                logger.debug(f"Raw Ollama response hash: {response_hash}")
 
                 # Strip markdown wrappers
                 response_text = _strip_markdown_json(response_text)
@@ -147,6 +150,8 @@ class OllamaProvider:
                 raise
 
 class OpenRouterProvider:
+    DEFAULT_MAX_TOKENS = 4096
+
     def __init__(self, api_key: str = None, model: str = None):
         self._backend_key = settings.OPENROUTER_API_KEY
         self.api_key = api_key or self._backend_key
@@ -158,15 +163,12 @@ class OpenRouterProvider:
             self.model = self.model_list[0] if self.model_list else settings.OPENROUTER_MODEL
         logger.info(f"OpenRouterProvider initialized with models={self.model_list}")
 
-    async def generate_json(self, prompt: str, expected_schema: Type[BaseModel], client_api_key: str | None = None) -> tuple[BaseModel, UsageStats]:
-        effective_key = self._backend_key or client_api_key or self.api_key
+    async def generate_json(self, prompt: str, expected_schema: Type[BaseModel]) -> tuple[BaseModel, UsageStats]:
+        effective_key = self._backend_key
         if not effective_key:
             raise ValueError("OpenRouter API key is missing. Set OPENROUTER_API_KEY in your config/.env file.")
 
-        if self._backend_key:
-            logger.info("Using backend OpenRouter API key (from .env)")
-        else:
-            logger.info("Using frontend-provided OpenRouter API key")
+        logger.info("Using backend OpenRouter API key (from .env)")
 
         url = "https://openrouter.ai/api/v1/chat/completions"
         headers = {
@@ -185,12 +187,16 @@ class OpenRouterProvider:
             "Output only the raw JSON object, without markdown block wrappers or extra text."
         )
 
+        import hashlib
+        prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()[:12]
+        logger.debug(f"Sending request to OpenRouter with prompt hash: {prompt_hash}")
+
         last_exception = None
         for model in self.model_list:
             logger.info(f"OpenRouter attempting generation using model '{model}'...")
             
             max_attempts = 3
-            current_max_tokens = None
+            current_max_tokens = self.DEFAULT_MAX_TOKENS
             try:
                 async with httpx.AsyncClient(timeout=float(settings.LLM_REQUEST_TIMEOUT)) as client:
                     for attempt in range(1, max_attempts + 1):
@@ -217,7 +223,8 @@ class OpenRouterProvider:
                                 raise ValueError(f"OpenRouter API returned error: {err_msg}")
 
                             response_text = data["choices"][0]["message"]["content"].strip()
-                            logger.debug(f"Raw OpenRouter response: {response_text}")
+                            response_hash = hashlib.sha256(response_text.encode()).hexdigest()[:12]
+                            logger.debug(f"Raw OpenRouter response hash: {response_hash}")
 
                             # Strip markdown wrappers
                             response_text = _strip_markdown_json(response_text)
@@ -289,10 +296,8 @@ class OpenRouterProvider:
                             logger.error(f"HTTP error contacting OpenRouter: {str(e)}")
                             raise
                         except json.JSONDecodeError as e:
-                            logger.error(f"Failed to decode OpenRouter response as JSON. Raw text: {response_text}. Error: {str(e)}")
+                            logger.error(f"Failed to decode OpenRouter response as JSON. Error: {str(e)}")
                             if attempt < max_attempts:
-                                if current_max_tokens is None:
-                                    current_max_tokens = 1000
                                 current_max_tokens = min(int(current_max_tokens * 1.5), 4096)
                                 logger.warning(f"Retrying OpenRouter request with max_tokens={current_max_tokens} due to JSONDecodeError (attempt {attempt}/{max_attempts})")
                                 continue
@@ -308,146 +313,3 @@ class OpenRouterProvider:
 
         raise last_exception or ValueError("All OpenRouter models in fallback list failed.")
 
-class MockLLMProvider:
-    """
-    Deterministic mock provider that varies its output based on search keywords in the prompt/goal.
-    Used for unit testing without a running Ollama container.
-    """
-    def __init__(self):
-        logger.info("MockLLMProvider initialized")
-        # Define predefined tasks and dependencies for categories
-        self.category_tasks = {
-            "Frontend": [
-                Task(id="fe_setup", title="Setup frontend project", description="Initialize React & Vite", estimated_hours=4.0),
-                Task(id="fe_components", title="Build UI components", description="Build button, card, input fields", estimated_hours=8.0),
-                Task(id="fe_state", title="Implement state management", description="Configure Redux/Zustand store", estimated_hours=6.0),
-                Task(id="fe_auth", title="Connect login pages", description="Integrate authentication endpoint", estimated_hours=5.0),
-                Task(id="fe_deploy", title="Bundle and deploy", description="Build production bundle and deploy", estimated_hours=3.0),
-            ],
-            "Backend": [
-                Task(id="be_setup", title="Setup FastAPI application", description="Install dependencies and setup basic structure", estimated_hours=4.0),
-                Task(id="be_models", title="Design database models", description="Create SQLAlchemy async models", estimated_hours=5.0),
-                Task(id="be_auth", title="Implement auth controller", description="Create JWT token auth endpoints", estimated_hours=6.0),
-                Task(id="be_endpoints", title="Create project API routes", description="Define CRUD endpoints for projects", estimated_hours=8.0),
-                Task(id="be_tests", title="Write integration tests", description="Write Pytest tests for API endpoints", estimated_hours=6.0),
-            ],
-            "Database": [
-                Task(id="db_init", title="Setup SQLite connection pool", description="Initialize engine and async session maker", estimated_hours=3.0),
-                Task(id="db_migrations", title="Setup Alembic migrations", description="Initialize Alembic and configure env.py", estimated_hours=4.0),
-                Task(id="db_seed", title="Create seed data script", description="Write scripts to pre-populate DB for development", estimated_hours=3.0),
-                Task(id="db_backup", title="Setup backups", description="Write automation script to backup SQLite database", estimated_hours=2.0),
-                Task(id="db_optimize", title="Add indexes", description="Analyze query plans and optimize keys", estimated_hours=3.0),
-            ],
-            "DevOps": [
-                Task(id="do_docker", title="Containerize application", description="Write Dockerfiles and docker-compose.yml", estimated_hours=4.0),
-                Task(id="do_ci", title="Configure CI workflow", description="Setup Github Actions checks", estimated_hours=3.0),
-                Task(id="do_logs", title="Setup Prometheus monitoring", description="Integrate monitoring metrics", estimated_hours=5.0),
-                Task(id="do_ssl", title="Configure Nginx and SSL", description="Setup reverse proxy with Let's Encrypt", estimated_hours=4.0),
-                Task(id="do_deploy", title="Deploy to staging VPS", description="Configure automation and run app", estimated_hours=5.0),
-            ],
-            "UI Design": [
-                Task(id="ui_wireframes", title="Design Wireframes", description="Create low-fidelity layout plans", estimated_hours=8.0),
-                Task(id="ui_mockups", title="Design High-Fidelity Mockups", description="Create UI designs in Figma", estimated_hours=12.0),
-                Task(id="ui_design_system", title="Create Design System", description="Define color palettes and components", estimated_hours=6.0),
-            ],
-            "API Integration": [
-                Task(id="api_client", title="Setup HTTP Client", description="Implement custom Axios/Retrofit client", estimated_hours=4.0),
-                Task(id="api_sync", title="Sync Offline Storage", description="Design offline SQLite cache synchronization", estimated_hours=8.0),
-            ],
-            "iOS App": [
-                Task(id="ios_setup", title="Initialize Swift Project", description="Configure bundle ID and project settings", estimated_hours=4.0),
-                Task(id="ios_ui", title="Implement SwiftUI Views", description="Build views from mockups", estimated_hours=16.0),
-            ],
-            "Android App": [
-                Task(id="and_setup", title="Initialize Kotlin Project", description="Configure gradle settings and package", estimated_hours=4.0),
-                Task(id="and_ui", title="Implement Compose UI", description="Build jetpack compose screens", estimated_hours=16.0),
-            ],
-            "Planning": [
-                Task(id="plan_spec", title="Write Technical Specification", description="Detail system requirements", estimated_hours=8.0),
-                Task(id="plan_architecture", title="Design System Architecture", description="Create ERD diagrams and system flowcharts", estimated_hours=6.0),
-            ],
-            "Development": [
-                Task(id="dev_db", title="Initialize database schema", description="Create tables and initial setup", estimated_hours=5.0),
-                Task(id="dev_api", title="Implement core endpoints", description="Create API routing and controllers", estimated_hours=12.0),
-            ],
-            "Testing": [
-                Task(id="test_unit", title="Write Unit Tests", description="Write tests for business logic", estimated_hours=8.0),
-                Task(id="test_integration", title="Write Integration Tests", description="Write tests verifying DB and API interaction", estimated_hours=8.0),
-            ],
-            "Deployment": [
-                Task(id="dep_env", title="Setup production server", description="Install dependencies and systemd services", estimated_hours=6.0),
-                Task(id="dep_build", title="Build production assets", description="Generate static bundle and check artifacts", estimated_hours=3.0),
-            ]
-        }
-
-        # Defined static dependencies
-        self.predefined_dependencies = {
-            "fe_components": ["fe_setup"],
-            "fe_state": ["fe_components"],
-            "fe_auth": ["fe_state", "be_auth"],
-            "fe_deploy": ["fe_components", "fe_state"],
-            "be_models": ["be_setup"],
-            "be_auth": ["be_models"],
-            "be_endpoints": ["be_models", "be_auth"],
-            "be_tests": ["be_endpoints"],
-            "do_ci": ["fe_setup", "be_setup"],
-            "do_deploy": ["fe_deploy", "be_tests"],
-            "api_sync": ["api_client"],
-            "ios_ui": ["ios_setup"],
-            "and_ui": ["and_setup"],
-            "dev_api": ["dev_db"],
-            "test_integration": ["test_unit"],
-            "dep_build": ["dep_env"]
-        }
-
-    async def generate_json(self, prompt: str, expected_schema: Type[BaseModel]) -> tuple[BaseModel, UsageStats]:
-        usage = UsageStats(prompt_tokens=100, completion_tokens=150, total_tokens=250, estimated_cost_usd=0.00015)
-
-        # Check target schema type
-        if expected_schema is CategoriesResponse:
-            if re.search(r"web app|website", prompt, re.IGNORECASE):
-                categories = ["Frontend", "Backend", "Database", "DevOps"]
-            elif re.search(r"mobile|app", prompt, re.IGNORECASE):
-                categories = ["UI Design", "API Integration", "iOS App", "Android App"]
-            else:
-                categories = ["Planning", "Development", "Testing", "Deployment"]
-            return CategoriesResponse(categories=categories), usage
-
-        elif expected_schema is TasksResponse:
-            # Try to identify category in prompt (e.g. Category to focus on: "Frontend")
-            category_match = re.search(r"Category to focus on:\s*[\"']([^\"']+)[\"']", prompt, re.IGNORECASE)
-            category_name = category_match.group(1) if category_match else "Development"
-
-            # Fetch predefined tasks or fallback to generic Development
-            tasks = self.category_tasks.get(category_name, self.category_tasks["Development"])
-            return TasksResponse(tasks=tasks), usage
-
-        elif expected_schema is DependencyMapResponse:
-            # Parse prompt to see what task IDs are in the tree
-            found_ids = re.findall(r'"id"\s*:\s*"([^"]+)"', prompt)
-
-            dependencies = {}
-            for task_id in found_ids:
-                deps = self.predefined_dependencies.get(task_id, [])
-                filtered_deps = [d for d in deps if d in found_ids]
-                dependencies[task_id] = filtered_deps
-
-            return DependencyMapResponse(dependencies=dependencies), usage
-
-        raise ValueError(f"MockLLMProvider does not support target schema: {expected_schema}")
-
-class FailingMockLLM(MockLLMProvider):
-    """
-    Mock LLM provider that fails on the first two calls and succeeds on the third attempt
-    to test the engine's tenacity retry behavior.
-    """
-    def __init__(self):
-        super().__init__()
-        self.call_count = 0
-
-    async def generate_json(self, prompt: str, expected_schema: Type[BaseModel]) -> tuple[BaseModel, UsageStats]:
-        self.call_count += 1
-        if self.call_count <= 2:
-            logger.warning(f"FailingMockLLM simulating failure (call_count={self.call_count})")
-            raise httpx.ConnectError("Connection timed out (simulated failure)")
-        return await super().generate_json(prompt, expected_schema)

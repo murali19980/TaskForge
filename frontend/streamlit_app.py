@@ -352,14 +352,21 @@ if "active_decomposition" in st.session_state:
                 if not tasks:
                     st.write("No tasks generated for this category.")
                 for task in tasks:
+                    import html
+                    safe_id = html.escape(str(task['id']))
+                    safe_title = html.escape(str(task['title']))
+                    safe_desc = html.escape(str(task['description']))
+                    safe_deps_list = [html.escape(str(dep)) for dep in task.get('dependencies', [])]
+                    safe_deps_str = ", ".join(safe_deps_list)
+
                     # Inject custom CSS styling for Task cards
                     st.markdown(f"""
                     <div class="task-card">
                         <div class="task-header">
-                            <span class="task-title">[{task['id']}] {task['title']}</span>
+                            <span class="task-title">[{safe_id}] {safe_title}</span>
                             <span class="task-hours">{task['estimated_hours']:.1f} hrs</span>
                         </div>
-                        <div class="task-desc">{task['description']}</div>
-                        {f'<div class="task-dep">⛓️ Depends on: {", ".join(task["dependencies"])}</div>' if task.get('dependencies') else ''}
+                        <div class="task-desc">{safe_desc}</div>
+                        {f'<div class="task-dep">⛓️ Depends on: {safe_deps_str}</div>' if safe_deps_list else ''}
                     </div>
                     """, unsafe_allow_html=True)

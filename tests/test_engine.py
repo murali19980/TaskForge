@@ -3,8 +3,8 @@ import asyncio
 from pydantic import ValidationError as PydanticValidationError
 from taskforge.exceptions import ValidationError
 from taskforge.engine import TaskForgeEngine
-from taskforge.llm_provider import MockLLMProvider, FailingMockLLM, DependencyMapResponse
-from taskforge.models import CategoriesResponse, TasksResponse, TaskTree, DecomposeResponse, UsageStats
+from tests.mocks import MockLLMProvider, FailingMockLLM
+from taskforge.models import CategoriesResponse, TasksResponse, TaskTree, DecomposeResponse, UsageStats, DependencyMapResponse
 
 class SpyingMockProvider(MockLLMProvider):
     def __init__(self):
